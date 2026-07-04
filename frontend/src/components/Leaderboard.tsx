@@ -26,7 +26,7 @@ export default function Leaderboard() {
     <div className="leaderboard">
       <h2>排行榜</h2>
       {entries.length === 0 ? (
-        <p style={{ textAlign: "center", color: "#666" }}>暂无数据</p>
+        <p style={{ textAlign: "center", opacity: .6 }}>暂无数据</p>
       ) : (
         <table>
           <thead>

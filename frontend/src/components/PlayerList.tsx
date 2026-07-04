@@ -17,7 +17,7 @@ export default function PlayerList({ players, currentSeat, localSeat }: Props) {
           <div key={p.seatIndex} className={`player-info ${p.seatIndex === currentSeat ? "active" : ""}`}>
             <div className="name">{p.username} {p.isHost ? "👑" : ""}</div>
             <div className="cards">{p.handCount} 张牌</div>
-            <div style={{ fontSize: 12, color: "#666" }}>座位 {p.seatIndex + 1}</div>
+            <div className="seat">座位 {p.seatIndex + 1}</div>
           </div>
         ))}
       </div>

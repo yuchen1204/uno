@@ -175,7 +175,7 @@ export default function GameScreen({ code, onLeave }: Props) {
         )}
 
         {gameState.phase === "finished" && (
-          <div style={{ textAlign: "center" }}>
+          <div className="finished-box">
             <h2>
               游戏结束！
               {gameState.winnerSeat === localSeat ? "你赢了！" : `座位 ${(gameState.winnerSeat ?? 0) + 1} 获胜`}

@@ -47,7 +47,7 @@ export default function Lobby({ onJoinGame }: Props) {
         <div className="room-list">
           <h2>公开房间</h2>
           {rooms.length === 0 ? (
-            <p style={{ color: "#666" }}>暂无公开房间，创建一个吧</p>
+            <p style={{ opacity: .6 }}>暂无公开房间，创建一个吧</p>
           ) : (
             rooms.map(room => (
               <div
@@ -74,27 +74,15 @@ export default function Lobby({ onJoinGame }: Props) {
             创建房间
           </button>
 
-          <div style={{ borderTop: "1px solid #333", paddingTop: 16 }}>
+          <div className="sidebar-divider">
             <h3>输入房间码加入</h3>
             <input
               type="text"
+              className="code-input"
               placeholder="6位房间码"
               value={joinCode}
               onChange={e => setJoinCode(e.target.value.toUpperCase())}
               maxLength={6}
-              style={{
-                display: "block",
-                width: "100%",
-                padding: 10,
-                marginBottom: 8,
-                background: "#1a1a2e",
-                border: "1px solid #333",
-                borderRadius: 6,
-                color: "#eee",
-                fontSize: 18,
-                fontFamily: "monospace",
-                textAlign: "center",
-              }}
             />
             <button onClick={handleJoinByCode} style={{ width: "100%" }}>
               加入
