@@ -352,11 +352,21 @@ export class GameRoomDO extends DurableObject<Env> {
     }
 
     if (action === "draw_card") {
-      return this.handleDrawCard(player, players, gameState);
+      const res = this.handleDrawCard(player, players, gameState);
+      if (res.success) {
+        this.ctx.storage.sql.exec("UPDATE players SET skip_count = 0 WHERE seat_index = ?", player.seatIndex);
+        this.broadcastState();
+      }
+      return res;
     } else if (action === "skip_turn") {
       return this.handleSkipTurn(player, players, gameState);
     } else if (action === "play_card") {
-      return this.handlePlayCard(player, players, gameState, payload);
+      const res = this.handlePlayCard(player, players, gameState, payload);
+      if (res.success) {
+        this.ctx.storage.sql.exec("UPDATE players SET skip_count = 0 WHERE seat_index = ?", player.seatIndex);
+        this.broadcastState();
+      }
+      return res;
     } else if (action === "say_uno") {
       return { success: true };
     }
@@ -489,7 +499,7 @@ export class GameRoomDO extends DurableObject<Env> {
 
     const skipCount = player.skipCount ?? 0;
     if (skipCount >= 3) {
-      return { success: false, error: "已跳过3次，必须摸牌" };
+      return { success: false, error: "已跳过3次，必须出牌或摸牌" };
     }
 
     this.ctx.storage.sql.exec("UPDATE players SET skip_count = skip_count + 1 WHERE seat_index = ?", player.seatIndex);
