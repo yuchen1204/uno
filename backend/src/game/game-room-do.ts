@@ -82,7 +82,10 @@ export class GameRoomDOv2 extends DurableObject<Env> {
       this.ctx.storage.sql.exec("UPDATE players SET connected = 1 WHERE seat_index = ?", existingMe.seat_index);
       await this.ctx.storage.deleteAlarm();
       this.broadcastState();
-      return { seatIndex: existingMe.seat_index, playerCount: existingPlayers.length };
+      const tokenRow = this.ctx.storage.sql.exec<{ seat_token: string }>(
+        "SELECT seat_token FROM players WHERE seat_index = ?", existingMe.seat_index
+      ).one();
+      return { seatIndex: existingMe.seat_index, playerCount: existingPlayers.length, seatToken: tokenRow?.seat_token };
     }
 
     const host = existingPlayers.find((p) => p.is_host === 1);
