@@ -1,7 +1,10 @@
 import { v4 as uuidv4 } from "uuid";
 import bcrypt from "bcryptjs";
 import { Session } from "./types";
-import type { Env } from "./index";
+import type { Env } from "./env";
+import { SESSION_TTL_DAYS } from "../../shared/constants";
+
+const SESSION_TTL_SECONDS = SESSION_TTL_DAYS * 24 * 60 * 60;
 
 function generateToken(): string {
   return uuidv4().replace(/-/g, "") + uuidv4().replace(/-/g, "");
@@ -10,7 +13,7 @@ function generateToken(): string {
 async function createSession(userId: string, username: string, env: Env): Promise<string> {
   const token = generateToken();
   const now = new Date();
-  const expiresAt = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+  const expiresAt = new Date(now.getTime() + SESSION_TTL_SECONDS * 1000);
   const session: Session = {
     userId,
     username,
@@ -18,7 +21,7 @@ async function createSession(userId: string, username: string, env: Env): Promis
     expiresAt: expiresAt.toISOString(),
   };
   await env.SESSIONS.put(`session:${token}`, JSON.stringify(session), {
-    expirationTtl: 7 * 24 * 60 * 60,
+    expirationTtl: SESSION_TTL_SECONDS,
   });
   return token;
 }

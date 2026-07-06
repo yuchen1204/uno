@@ -1,11 +1,13 @@
 import { v4 as uuidv4 } from "uuid";
-import type { Env } from "./index";
+import type { Env } from "./env";
 import { authenticateRequest } from "./auth";
+import { ROOM_CODE_LENGTH, MAX_PLAYERS, MIN_PLAYERS } from "../../shared/constants";
+import type { LobbyDOv2, GameRoomDOv2 } from "./index";
 
 function generateRoomCode(): string {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   let code = "";
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i < ROOM_CODE_LENGTH; i++) {
     code += chars[Math.floor(Math.random() * chars.length)];
   }
   return code;
@@ -17,7 +19,7 @@ export async function handleCreateRoom(request: Request, env: Env): Promise<Resp
     if (!["public", "private", "quick"].includes(type)) {
       return Response.json({ error: "无效的房间类型" }, { status: 400 });
     }
-    if (maxPlayers < 2 || maxPlayers > 4) {
+    if (maxPlayers < MIN_PLAYERS || maxPlayers > MAX_PLAYERS) {
       return Response.json({ error: "人数必须在2到4之间" }, { status: 400 });
     }
 
@@ -40,7 +42,7 @@ export async function handleCreateRoom(request: Request, env: Env): Promise<Resp
 
     if (type === "public") {
       const lobbyId = env.LOBBY_DO.idFromName("global_v2");
-      const lobbyStub = env.LOBBY_DO.get(lobbyId);
+      const lobbyStub = env.LOBBY_DO.get(lobbyId) as unknown as DurableObjectStub<LobbyDOv2>;
       await lobbyStub.addRoom(code, maxPlayers);
     }
 
@@ -53,7 +55,7 @@ export async function handleCreateRoom(request: Request, env: Env): Promise<Resp
 export async function handleListRooms(request: Request, env: Env): Promise<Response> {
   try {
     const lobbyId = env.LOBBY_DO.idFromName("global_v2");
-    const lobbyStub = env.LOBBY_DO.get(lobbyId);
+    const lobbyStub = env.LOBBY_DO.get(lobbyId) as unknown as DurableObjectStub<LobbyDOv2>;
     const rooms = await lobbyStub.listRooms();
     return Response.json({ rooms });
   } catch (e) {
@@ -64,7 +66,7 @@ export async function handleListRooms(request: Request, env: Env): Promise<Respo
 export async function handleRoomDetail(request: Request, env: Env, pathname: string): Promise<Response> {
   const parts = pathname.split("/");
   const code = parts[3];
-  if (!code || code.length !== 6) {
+  if (!code || code.length !== ROOM_CODE_LENGTH) {
     return Response.json({ error: "无效的房间码" }, { status: 400 });
   }
 
@@ -96,14 +98,14 @@ async function handleJoinRoom(code: string, request: Request, env: Env): Promise
     .first<{ code: string; type: string; status: string; max_players: number }>();
   if (!room) {
     const lobbyId = env.LOBBY_DO.idFromName("global_v2");
-    const lobbyStub = env.LOBBY_DO.get(lobbyId);
+    const lobbyStub = env.LOBBY_DO.get(lobbyId) as unknown as DurableObjectStub<LobbyDOv2>;
     await lobbyStub.removeRoom(code);
     return Response.json({ error: "房间不存在" }, { status: 404 });
   }
   if (room.status === "finished") {
     if (room.type === "public") {
       const lobbyId = env.LOBBY_DO.idFromName("global_v2");
-      const lobbyStub = env.LOBBY_DO.get(lobbyId);
+      const lobbyStub = env.LOBBY_DO.get(lobbyId) as unknown as DurableObjectStub<LobbyDOv2>;
       await lobbyStub.removeRoom(code);
     }
     return Response.json({ error: "游戏已结束" }, { status: 400 });
@@ -134,12 +136,12 @@ async function handleJoinRoom(code: string, request: Request, env: Env): Promise
   }
 
   const gameRoomId = env.GAME_ROOM_DO.idFromName(code);
-  const gameStub = env.GAME_ROOM_DO.get(gameRoomId);
+  const gameStub = env.GAME_ROOM_DO.get(gameRoomId) as unknown as DurableObjectStub<GameRoomDOv2>;
   const joinResult = await gameStub.joinGame(code, username, userId, room.max_players, room.type);
 
   if (room.type === "public") {
     const lobbyId = env.LOBBY_DO.idFromName("global_v2");
-    const lobbyStub = env.LOBBY_DO.get(lobbyId);
+    const lobbyStub = env.LOBBY_DO.get(lobbyId) as unknown as DurableObjectStub<LobbyDOv2>;
     await lobbyStub.updatePlayerCount(code, joinResult.playerCount);
   }
 
@@ -179,7 +181,7 @@ export async function handleLeaveRoom(code: string, request: Request, env: Env):
   }
 
   const gameRoomId = env.GAME_ROOM_DO.idFromName(code);
-  const gameStub = env.GAME_ROOM_DO.get(gameRoomId);
+  const gameStub = env.GAME_ROOM_DO.get(gameRoomId) as unknown as DurableObjectStub<GameRoomDOv2>;
   const result = await gameStub.leaveGame(username, userId);
 
   if (result.success) {
@@ -187,12 +189,12 @@ export async function handleLeaveRoom(code: string, request: Request, env: Env):
       await env.DB.prepare("UPDATE rooms SET status = 'finished' WHERE code = ?").bind(code).run();
       if (room.type === "public") {
         const lobbyId = env.LOBBY_DO.idFromName("global_v2");
-        const lobbyStub = env.LOBBY_DO.get(lobbyId);
+        const lobbyStub = env.LOBBY_DO.get(lobbyId) as unknown as DurableObjectStub<LobbyDOv2>;
         await lobbyStub.removeRoom(code);
       }
     } else if (room.type === "public") {
       const lobbyId = env.LOBBY_DO.idFromName("global_v2");
-      const lobbyStub = env.LOBBY_DO.get(lobbyId);
+      const lobbyStub = env.LOBBY_DO.get(lobbyId) as unknown as DurableObjectStub<LobbyDOv2>;
       await lobbyStub.updatePlayerCount(code, result.playerCount || 0);
     }
   }

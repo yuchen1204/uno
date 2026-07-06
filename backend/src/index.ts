@@ -6,15 +6,14 @@ import { Card, CardColor, GameState, PlayerFull, PlayerInfo } from "./types";
 import { createDeck, shuffleDeck, dealCards, cardToScore } from "./game/deck";
 import { canPlayCard } from "./game/rules";
 import { calculateHandScore } from "./game/scoring";
+import {
+  COUNTDOWN_DURATION_MS, INITIAL_HAND_SIZE, IDLE_TIMEOUT_MS, DISCONNECT_TIMEOUT_MS,
+  IDLE_CHECK_INTERVAL_MS, LAST_CARD_WILD_PENALTY, PLAY_HISTORY_LIMIT, MAX_SKIP_COUNT,
+  ROOM_CODE_LENGTH, LEADERBOARD_DEFAULT_LIMIT, LEADERBOARD_MAX_LIMIT,
+} from "../../shared/constants";
+import type { Env, PlayerRow, PlayerBasicRow, RoomConfigRow, PlayHistoryRow, GameStateRow } from "./env";
 
-export interface Env {
-  DB: D1Database;
-  SESSIONS: KVNamespace;
-  LOBBY_DO: DurableObjectNamespace<LobbyDO>;
-  GAME_ROOM_DO: DurableObjectNamespace<GameRoomDO>;
-}
-
-export class LobbyDO extends DurableObject<Env> {
+export class LobbyDOv2 extends DurableObject {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
@@ -64,7 +63,7 @@ export class LobbyDO extends DurableObject<Env> {
   }
 }
 
-export class GameRoomDO extends DurableObject<Env> {
+export class GameRoomDOv2 extends DurableObject<Env> {
   pendingStreams: WritableStream[] = [];
   disconnectTimers: Map<number, number> = new Map();
 
@@ -130,11 +129,10 @@ export class GameRoomDO extends DurableObject<Env> {
   }
 
   async joinGame(code: string, username: string, userId: string | null, maxPlayers: number = 4, roomType: string = "private"): Promise<{ seatIndex: number; playerCount: number }> {
-    const existingPlayers = this.ctx.storage.sql.exec(
-      "SELECT seat_index, user_id, username FROM players ORDER BY seat_index"
-    ).toArray() as any[];
-
-    const existingMe = existingPlayers.find((p: any) => userId ? p.user_id === userId : p.username === username);
+    const existingPlayers = this.ctx.storage.sql.exec<PlayerBasicRow>(
+      "SELECT seat_index, user_id, username, is_host FROM players ORDER BY seat_index"
+    ).toArray();
+    const existingMe = existingPlayers.find((p) => userId ? p.user_id === userId : p.username === username);
     if (existingMe) {
       this.ctx.storage.sql.exec("UPDATE players SET connected = 1 WHERE seat_index = ?", existingMe.seat_index);
       await this.ctx.storage.deleteAlarm();
@@ -142,21 +140,29 @@ export class GameRoomDO extends DurableObject<Env> {
       return { seatIndex: existingMe.seat_index, playerCount: existingPlayers.length };
     }
 
-    const configs = this.ctx.storage.sql.exec("SELECT * FROM room_config LIMIT 1").toArray() as any[];
+    const host = existingPlayers.find((p) => p.is_host === 1);
+    if (host && host.username === username) {
+      throw new Error("昵称不能与房主相同");
+    }
+
+    const nameConflict = existingPlayers.find((p) => p.username === username);
+    if (nameConflict) throw new Error("昵称已被房间内其他玩家使用");
+
+    const configs = this.ctx.storage.sql.exec<RoomConfigRow>("SELECT * FROM room_config LIMIT 1").toArray();
     let config = configs.length > 0 ? configs[0] : null;
     if (!config) {
       this.ctx.storage.sql.exec(
         "INSERT INTO room_config (code, type, max_players, status) VALUES (?, ?, ?, 'waiting')",
         code, roomType, maxPlayers
       );
-      config = { status: "waiting", max_players: maxPlayers, type: roomType };
+      config = { code: code, type: roomType, max_players: maxPlayers, min_players: 2, status: "waiting", last_activity: 0 };
     }
-    if (config.status !== "waiting" && config.status !== "countdown") throw new Error("房间不可加入");
+    if (config && config.status !== "waiting" && config.status !== "countdown") throw new Error("房间不可加入");
 
-    const roomMaxPlayers = config.max_players;
+    const roomMaxPlayers = config!.max_players;
     if (existingPlayers.length >= roomMaxPlayers) throw new Error("房间已满");
 
-    const usedSeats = new Set(existingPlayers.map((p: any) => p.seat_index));
+    const usedSeats = new Set(existingPlayers.map(p => p.seat_index));
     let seatIndex = 0;
     while (usedSeats.has(seatIndex)) seatIndex++;
 
@@ -176,10 +182,9 @@ export class GameRoomDO extends DurableObject<Env> {
   }
 
   async leaveGame(username: string, userId: string | null): Promise<{ success: boolean; error?: string; empty?: boolean; playerCount?: number }> {
-    const existingPlayers = this.ctx.storage.sql.exec(
+    const existingPlayers = this.ctx.storage.sql.exec<PlayerRow>(
       "SELECT seat_index, user_id, username, hand, is_host, connected, score FROM players ORDER BY seat_index"
-    ).toArray() as any[];
-
+    ).toArray();
     const me = existingPlayers.find(p => userId ? p.user_id === userId : p.username === username);
     if (!me) return { success: false, error: "玩家不在房间内" };
 
@@ -189,7 +194,7 @@ export class GameRoomDO extends DurableObject<Env> {
     // Calculate next seat BEFORE deleting, if current player is leaving
     let nextSeat: number | null = null;
     if (gameState?.phase === "playing" && remainingPlayers.length >= 2 && gameState.current_seat === me.seat_index) {
-      const fullPlayers = existingPlayers.map(r => ({
+      const fullPlayers: PlayerFull[] = existingPlayers.map(r => ({
         seatIndex: r.seat_index,
         userId: r.user_id,
         username: r.username,
@@ -198,8 +203,9 @@ export class GameRoomDO extends DurableObject<Env> {
         connected: r.connected === 1,
         isReady: r.is_ready === 1,
         score: r.score,
+        skipCount: r.skip_count ?? 0,
       }));
-      nextSeat = this.getNextSeat(me.seat_index, gameState.direction, fullPlayers);
+      nextSeat = this.getNextSeat(me.seat_index, gameState.direction as 1 | -1, fullPlayers);
     }
 
     this.ctx.storage.sql.exec("DELETE FROM players WHERE seat_index = ?", me.seat_index);
@@ -217,7 +223,7 @@ export class GameRoomDO extends DurableObject<Env> {
 
     if (gameState?.phase === "playing" && remainingPlayers.length === 1) {
       const winner = remainingPlayers[0];
-      const allPlayersForScore = existingPlayers.map(r => ({
+      const allPlayersForScore: PlayerFull[] = existingPlayers.map(r => ({
         seatIndex: r.seat_index,
         userId: r.user_id,
         username: r.username,
@@ -226,6 +232,7 @@ export class GameRoomDO extends DurableObject<Env> {
         connected: r.connected === 1,
         isReady: r.is_ready === 1,
         score: r.score,
+        skipCount: r.skip_count ?? 0,
       }));
       await this.finishGame(winner.seat_index, allPlayersForScore, 0, 0);
     }
@@ -251,25 +258,25 @@ export class GameRoomDO extends DurableObject<Env> {
     const players = this.getAllPlayers();
     if (players.length < 2) return { success: false, error: "玩家人数不足" };
 
-    this.ctx.storage.sql.exec("UPDATE game_state SET phase = 'countdown', countdown_end = ?", Date.now() + 3000);
+    this.ctx.storage.sql.exec("UPDATE game_state SET phase = 'countdown', countdown_end = ?", Date.now() + COUNTDOWN_DURATION_MS);
     this.ctx.storage.sql.exec("UPDATE room_config SET status = 'countdown'");
     setTimeout(() => {
       this.actualStartGame().catch(console.error);
-    }, 3000);
+    }, COUNTDOWN_DURATION_MS);
     this.broadcastState();
     return { success: true };
   }
 
   async actualStartGame(): Promise<{ success: boolean; error?: string }> {
-    const config = this.ctx.storage.sql.exec("SELECT * FROM room_config").one() as any;
+    const config = this.ctx.storage.sql.exec<RoomConfigRow>("SELECT * FROM room_config").one();
     if (!config) return { success: false, error: "房间未初始化" };
 
     const gameState = this.getGameState();
     if (gameState?.phase !== "countdown") return { success: false, error: "不在倒数阶段" };
 
-    const players = this.ctx.storage.sql.exec(
+    const players = this.ctx.storage.sql.exec<PlayerRow>(
       "SELECT * FROM players ORDER BY seat_index"
-    ).toArray() as any[];
+    ).toArray();
     if (players.length < 2) {
       this.ctx.storage.sql.exec("UPDATE game_state SET phase = 'waiting', countdown_end = 0");
       this.broadcastState();
@@ -282,7 +289,7 @@ export class GameRoomDO extends DurableObject<Env> {
     let deck = shuffleDeck(createDeck());
 
     for (const player of players) {
-      const { cards, remaining } = dealCards(deck, 7);
+      const { cards, remaining } = dealCards(deck, INITIAL_HAND_SIZE);
       deck = remaining;
       this.ctx.storage.sql.exec(
         "UPDATE players SET hand = ? WHERE seat_index = ?",
@@ -314,7 +321,7 @@ export class GameRoomDO extends DurableObject<Env> {
 
     if (config.type === "public") {
       const lobbyId = this.env.LOBBY_DO.idFromName("global_v2");
-      const lobbyStub = this.env.LOBBY_DO.get(lobbyId);
+      const lobbyStub = this.env.LOBBY_DO.get(lobbyId) as unknown as DurableObjectStub<LobbyDOv2>;
       await lobbyStub.removeRoom(config.code);
     }
 
@@ -322,7 +329,7 @@ export class GameRoomDO extends DurableObject<Env> {
     return { success: true };
   }
 
-  async playerAction(seatIndex: number, action: string, payload?: any, verify: { username?: string; userId?: string } = {}): Promise<{ success: boolean; error?: string; scoreChange?: number; targetSeat?: number }> {
+  async playerAction(seatIndex: number, action: string, payload?: { cardIndex?: number; color?: CardColor; comboCardIndex?: number }, verify: { username?: string; userId?: string } = {}): Promise<{ success: boolean; error?: string; scoreChange?: number; targetSeat?: number }> {
     // Verify that the requestor owns the seat
     const players = this.getAllPlayers();
     const player = players.find(p => p.seatIndex === seatIndex);
@@ -361,7 +368,7 @@ export class GameRoomDO extends DurableObject<Env> {
     } else if (action === "skip_turn") {
       return this.handleSkipTurn(player, players, gameState);
     } else if (action === "play_card") {
-      const res = this.handlePlayCard(player, players, gameState, payload);
+      const res = this.handlePlayCard(player, players, gameState, (payload || {}) as { cardIndex: number; color?: CardColor; comboCardIndex?: number });
       if (res.success) {
         this.ctx.storage.sql.exec("UPDATE players SET skip_count = 0 WHERE seat_index = ?", player.seatIndex);
         this.broadcastState();
@@ -388,7 +395,7 @@ export class GameRoomDO extends DurableObject<Env> {
     const updatedPlayers = this.getAllPlayers();
     const connectedPlayers = updatedPlayers.filter(p => p.connected);
     const allReady = connectedPlayers.every(p => p.isReady);
-    const config = this.ctx.storage.sql.exec("SELECT max_players FROM room_config LIMIT 1").one() as any;
+    const config = this.ctx.storage.sql.exec<{ max_players: number }>("SELECT max_players FROM room_config LIMIT 1").one();
     const maxPlayers = config?.max_players ?? 4;
     const isFull = connectedPlayers.length >= maxPlayers;
     
@@ -396,11 +403,11 @@ export class GameRoomDO extends DurableObject<Env> {
     //   - all connected players are ready (at least 2 players)
     //   - or host starts manually
     if (allReady && connectedPlayers.length >= 2) {
-      this.ctx.storage.sql.exec("UPDATE game_state SET phase = 'countdown', countdown_end = ?", Date.now() + 3000);
+      this.ctx.storage.sql.exec("UPDATE game_state SET phase = 'countdown', countdown_end = ?", Date.now() + COUNTDOWN_DURATION_MS);
       this.ctx.storage.sql.exec("UPDATE room_config SET status = 'countdown'");
       setTimeout(() => {
         this.actualStartGame().catch(console.error);
-      }, 3000);
+      }, COUNTDOWN_DURATION_MS);
     }
 
     this.broadcastState();
@@ -423,10 +430,10 @@ export class GameRoomDO extends DurableObject<Env> {
     return { success: true };
   }
 
-  private handleDrawCard(player: PlayerFull, players: PlayerFull[], state: any): { success: boolean; error?: string; scoreChange?: number } {
+  private handleDrawCard(player: PlayerFull, players: PlayerFull[], state: GameStateRow): { success: boolean; error?: string; scoreChange?: number } {
     let deck = JSON.parse(state.deck) as Card[];
     const wildColor = state.wild_color ? (state.wild_color as CardColor) : undefined;
-    const topCard = JSON.parse(state.top_card) as Card;
+    const topCard = JSON.parse(state.top_card || "{}") as Card;
 
     if (state.draw_accumulated > 0) {
       // Must draw all accumulated cards and pass turn
@@ -492,13 +499,13 @@ export class GameRoomDO extends DurableObject<Env> {
     return { success: true };
   }
 
-  private handleSkipTurn(player: PlayerFull, players: PlayerFull[], state: any): { success: boolean; error?: string; scoreChange?: number } {
+  private handleSkipTurn(player: PlayerFull, players: PlayerFull[], state: GameStateRow): { success: boolean; error?: string; scoreChange?: number } {
     if (state.draw_accumulated > 0) {
       return { success: false, error: "惩罚状态下不能跳过" };
     }
 
     const skipCount = player.skipCount ?? 0;
-    if (skipCount >= 3) {
+    if (skipCount >= MAX_SKIP_COUNT) {
       return { success: false, error: "已跳过3次，必须出牌或摸牌" };
     }
 
@@ -513,14 +520,15 @@ export class GameRoomDO extends DurableObject<Env> {
   handlePlayCard(
     player: PlayerFull,
     players: PlayerFull[],
-    state: any,
-    payload: { cardIndex: number; color?: CardColor; comboCardIndex?: number }
+    state: GameStateRow,
+    payload: { cardIndex?: number; color?: CardColor; comboCardIndex?: number } = {}
   ): { success: boolean; error?: string; scoreChange?: number; targetSeat?: number } {
-    const card = player.hand[payload.cardIndex];
+    const cardIndex = payload.cardIndex ?? -1;
+    const card = player.hand[cardIndex];
     if (!card) return { success: false, error: "无效的牌" };
 
     const wildColor = state.wild_color ? (state.wild_color as CardColor) : undefined;
-    const topCard = JSON.parse(state.top_card) as Card;
+    const topCard = JSON.parse(state.top_card || "{}") as Card;
 
     if (!canPlayCard(card, topCard, player.hand, wildColor, state.draw_accumulated, state.min_value)) {
       return { success: false, error: "不能出这张牌" };
@@ -531,12 +539,12 @@ export class GameRoomDO extends DurableObject<Env> {
       if (player.hand.length === 1) {
         // Last card is wild: draw 2 penalty cards, cannot win directly
         const deck = JSON.parse(state.deck) as Card[];
-        const count = Math.min(2, deck.length);
+        const count = Math.min(LAST_CARD_WILD_PENALTY, deck.length);
         const drawn = deck.slice(0, count);
         const newDeck = deck.slice(count);
         
         // Remove wild card and add 2 drawn cards
-        const newHand = player.hand.filter((_, i) => i !== payload.cardIndex).concat(drawn);
+        const newHand = player.hand.filter((_, i) => i !== cardIndex).concat(drawn);
         this.updatePlayerHand(player.seatIndex, newHand);
         this.updateDeck(newDeck);
 
@@ -544,7 +552,7 @@ export class GameRoomDO extends DurableObject<Env> {
         const discardPile = JSON.parse(state.discard_pile) as Card[];
         discardPile.push(topCard);
 
-        const nextSeat = this.getNextSeat(player.seatIndex, state.direction, players);
+        const nextSeat = this.getNextSeat(player.seatIndex, state.direction as 1 | -1, players);
         this.ctx.storage.sql.exec(
           "UPDATE game_state SET current_seat = ?, top_card = ?, deck = ?, discard_pile = ?, wild_color = ?, min_value = -1 WHERE id = 1",
           nextSeat,
@@ -562,7 +570,7 @@ export class GameRoomDO extends DurableObject<Env> {
       if (payload.comboCardIndex === undefined) {
         return { success: false, error: "请选择一张有色牌一起出！" };
       }
-      if (payload.comboCardIndex === payload.cardIndex) {
+      if (payload.comboCardIndex === cardIndex) {
         return { success: false, error: "不能选择自身作为连携牌！" };
       }
       const comboCard = player.hand[payload.comboCardIndex];
@@ -582,14 +590,14 @@ export class GameRoomDO extends DurableObject<Env> {
       }
 
       // Execute Wild Combo Play
-      const newHand = player.hand.filter((_, i) => i !== payload.cardIndex && i !== payload.comboCardIndex);
+      const newHand = player.hand.filter((_, i) => i !== cardIndex && i !== payload.comboCardIndex);
       this.updatePlayerHand(player.seatIndex, newHand);
 
       const deck = JSON.parse(state.deck) as Card[];
       const discardPile = JSON.parse(state.discard_pile) as Card[];
       discardPile.push(card); // push wild card
 
-      const nextSeat = this.getNextSeat(player.seatIndex, state.direction, players);
+      const nextSeat = this.getNextSeat(player.seatIndex, state.direction as 1 | -1, players);
       let addedPenalty = card.type === "wild4" ? 4 : 0;
       if (comboCard.type === "draw2") addedPenalty += 2;
 
@@ -633,12 +641,12 @@ export class GameRoomDO extends DurableObject<Env> {
       deck: JSON.parse(state.deck),
       topCard,
       wildColor,
-      cardIndex: payload.cardIndex
+      cardIndex: cardIndex
     });
   }
 
   private executePlayCard(
-    player: PlayerFull, players: PlayerFull[], state: any, card: Card,
+    player: PlayerFull, players: PlayerFull[], state: GameStateRow, card: Card,
     ctxData: { seatIndex: number; hand: Card[]; deck: Card[]; topCard: Card; wildColor?: CardColor; cardIndex: number }
   ): { success: boolean; error?: string; scoreChange?: number; targetSeat?: number } {
     const filteredHand = ctxData.hand.filter((_, i) => i !== ctxData.cardIndex);
@@ -648,7 +656,7 @@ export class GameRoomDO extends DurableObject<Env> {
     const discardPile = JSON.parse(state.discard_pile) as Card[];
     discardPile.push(ctxData.topCard);
 
-    let nextSeat = this.getNextSeat(ctxData.seatIndex, state.direction, players);
+    let nextSeat = this.getNextSeat(ctxData.seatIndex, state.direction as 1 | -1, players);
     let newDirection = state.direction;
     let scoreChange = 0;
     let targetSeat: number | undefined;
@@ -671,13 +679,13 @@ export class GameRoomDO extends DurableObject<Env> {
         skipAfter = true;
       } else {
         // 3+ players: just reverse direction, next player is opposite direction
-        nextSeat = this.getNextSeat(ctxData.seatIndex, newDirection, players);
+        nextSeat = this.getNextSeat(ctxData.seatIndex, newDirection as 1 | -1, players);
       }
     } else if (card.type === "draw2") {
       addedPenalty = 2;
     }
 
-    const updatedCurrentSeat = skipAfter ? this.getNextSeat(nextSeat, newDirection, players) : nextSeat;
+    const updatedCurrentSeat = skipAfter ? this.getNextSeat(nextSeat, newDirection as 1 | -1, players) : nextSeat;
     const newDrawAccumulated = state.draw_accumulated + addedPenalty;
 
     // Insert play history
@@ -726,6 +734,7 @@ export class GameRoomDO extends DurableObject<Env> {
     const player = this.getAllPlayers().find(p => p.seatIndex === seatIndex);
     if (!player) return;
     const gameState = this.getGameState();
+    if (!gameState) return;
     const deck = JSON.parse(gameState.deck) as Card[];
     const drawn = deck.slice(0, count);
     const newDeck = deck.slice(count);
@@ -748,15 +757,15 @@ export class GameRoomDO extends DurableObject<Env> {
     );
     this.ctx.storage.sql.exec("UPDATE room_config SET status = 'finished'");
 
-    const config = this.ctx.storage.sql.exec("SELECT type FROM room_config").one() as any;
+    const config = this.ctx.storage.sql.exec<{ code: string; type: string }>("SELECT code, type FROM room_config").one();
     if (config && config.type !== "quick" && this.env) {
       const winner = players.find(p => p.seatIndex === winnerSeat);
-      if (winner?.user_id) {
+      if (winner?.userId) {
         try {
           await this.env.DB.prepare("UPDATE users SET score = score + ? WHERE id = ?")
-            .bind(totalScore, winner.user_id)
+            .bind(totalScore, winner.userId)
             .run();
-        } catch (e) {}
+        } catch (e) { console.error("finishGame: failed to update winner score for user", winner.userId, e); }
       }
     }
 
@@ -766,11 +775,11 @@ export class GameRoomDO extends DurableObject<Env> {
 
   private addScoreToTarget(seatIndex: number, amount: number, players: PlayerFull[]): void {
     const player = players.find(p => p.seatIndex === seatIndex);
-    if (player?.user_id && this.env) {
+    if (player?.userId && this.env) {
       this.env.DB.prepare("UPDATE users SET score = score + ? WHERE id = ?")
-        .bind(amount, player.user_id)
+        .bind(amount, player.userId)
         .run()
-        .catch(() => {});
+        .catch((e: unknown) => { console.error("addScoreToTarget: failed to update score for user", player.userId, e); });
     }
   }
 
@@ -779,17 +788,17 @@ export class GameRoomDO extends DurableObject<Env> {
       this.env.DB.prepare("UPDATE rooms SET status = ? WHERE code = ?")
         .bind(status, code)
         .run()
-        .catch(() => {});
+        .catch((e: unknown) => { console.error("updateD1RoomStatus: failed for code", code, e); });
     }
   }
 
-  private getGameState(): any {
-    const rows = this.ctx.storage.sql.exec("SELECT * FROM game_state WHERE id = 1").toArray();
-    return rows.length > 0 ? rows[0] : null;
+  private getGameState(): GameStateRow | null {
+    const row = this.ctx.storage.sql.exec<GameStateRow>("SELECT * FROM game_state WHERE id = 1").one();
+    return row;
   }
 
   private getAllPlayers(): PlayerFull[] {
-    const rows = this.ctx.storage.sql.exec("SELECT * FROM players ORDER BY seat_index").toArray() as any[];
+    const rows = this.ctx.storage.sql.exec<PlayerRow>("SELECT * FROM players ORDER BY seat_index").toArray();
     return rows.map(r => ({
       seatIndex: r.seat_index,
       userId: r.user_id,
@@ -819,7 +828,7 @@ export class GameRoomDO extends DurableObject<Env> {
   }
 
   // Reshuffle discard pile (except top card) back into deck. Returns new deck or null if insufficient.
-  private reshuffleDiscard(deck: Card[], state: any): Card[] | null {
+  private reshuffleDiscard(deck: Card[], state: GameStateRow): Card[] | null {
     const discardPile = JSON.parse(state.discard_pile) as Card[];
     if (discardPile.length < 2) return null;
     const topDiscard = discardPile[discardPile.length - 1];
@@ -833,8 +842,8 @@ export class GameRoomDO extends DurableObject<Env> {
     return newDeck;
   }
 
-  private advanceToNext(state: any, players: PlayerFull[]): void {
-    const nextSeat = this.getNextSeat(state.current_seat, state.direction, players);
+  private advanceToNext(state: GameStateRow, players: PlayerFull[]): void {
+    const nextSeat = this.getNextSeat(state.current_seat!, state.direction as 1 | -1, players);
     this.ctx.storage.sql.exec(
       "UPDATE game_state SET current_seat = ? WHERE id = 1",
       nextSeat,
@@ -890,10 +899,9 @@ export class GameRoomDO extends DurableObject<Env> {
   }
 
   private async markPlayerOffline(username: string | null, userId: string | null) {
-    const existingPlayers = this.ctx.storage.sql.exec(
+    const existingPlayers = this.ctx.storage.sql.exec<PlayerBasicRow>(
       "SELECT seat_index, user_id, username FROM players"
-    ).toArray() as any[];
-
+    ).toArray();
     const me = existingPlayers.find(p => userId ? p.user_id === userId : p.username === username);
     if (me) {
       this.ctx.storage.sql.exec("UPDATE players SET connected = 0 WHERE seat_index = ?", me.seat_index);
@@ -902,9 +910,9 @@ export class GameRoomDO extends DurableObject<Env> {
       const activePlayers = updatedPlayers.filter(p => p.connected);
       const gameState = this.getGameState();
       if (activePlayers.length === 0) {
-        await this.ctx.storage.setAlarm(Date.now() + 30000);
+        await this.ctx.storage.setAlarm(Date.now() + DISCONNECT_TIMEOUT_MS);
       } else if (activePlayers.length === 1 && gameState?.phase !== "finished") {
-        await this.ctx.storage.setAlarm(Date.now() + 30000);
+        await this.ctx.storage.setAlarm(Date.now() + DISCONNECT_TIMEOUT_MS);
       }
       await this.broadcastState();
     }
@@ -915,10 +923,10 @@ export class GameRoomDO extends DurableObject<Env> {
     const activePlayers = players.filter(p => p.connected);
     const gameState = this.getGameState();
 
-    const configRow = this.ctx.storage.sql.exec("SELECT code, type, last_activity FROM room_config LIMIT 1").one() as any;
+    const configRow = this.ctx.storage.sql.exec<RoomConfigRow>("SELECT code, type, last_activity FROM room_config LIMIT 1").one();
     const lastActivity = configRow?.last_activity ?? 0;
     const elapsed = Date.now() - lastActivity;
-    const IDLE_TIMEOUT = 60000;
+    const IDLE_TIMEOUT = IDLE_TIMEOUT_MS;
 
     // Idle check: if no activity for 60 seconds, close room
     if (lastActivity > 0 && elapsed >= IDLE_TIMEOUT) {
@@ -932,18 +940,17 @@ export class GameRoomDO extends DurableObject<Env> {
           const writer = this.pendingStreams[i].getWriter();
           writer.write(closeData);
           writer.releaseLock();
-        } catch (e) {}
+        } catch (e) { console.error("alarm: failed to write close message to stream", e); }
       }
       this.pendingStreams = [];
-
       if (configRow) {
         await this.updateD1RoomStatus(configRow.code, "finished");
         if (configRow.type === "public") {
           try {
             const lobbyId = this.env.LOBBY_DO.idFromName("global_v2");
-            const lobbyStub = this.env.LOBBY_DO.get(lobbyId);
+            const lobbyStub = this.env.LOBBY_DO.get(lobbyId) as unknown as DurableObjectStub<LobbyDOv2>;
             await lobbyStub.removeRoom(configRow.code);
-          } catch (e) {}
+          } catch (e) { console.error("alarm: failed to remove public room", configRow.code, e); }
         }
       }
       this.ctx.storage.sql.exec("DELETE FROM players");
@@ -959,7 +966,7 @@ export class GameRoomDO extends DurableObject<Env> {
         await this.updateD1RoomStatus(config.code, "finished");
         if (config.type === "public") {
           const lobbyId = this.env.LOBBY_DO.idFromName("global_v2");
-          const lobbyStub = this.env.LOBBY_DO.get(lobbyId);
+          const lobbyStub = this.env.LOBBY_DO.get(lobbyId) as unknown as DurableObjectStub<LobbyDOv2>;
           await lobbyStub.removeRoom(config.code);
         }
       }
@@ -976,7 +983,7 @@ export class GameRoomDO extends DurableObject<Env> {
           await this.updateD1RoomStatus(config.code, "finished");
           if (config.type === "public") {
             const lobbyId = this.env.LOBBY_DO.idFromName("global_v2");
-            const lobbyStub = this.env.LOBBY_DO.get(lobbyId);
+            const lobbyStub = this.env.LOBBY_DO.get(lobbyId) as unknown as DurableObjectStub<LobbyDOv2>;
             await lobbyStub.removeRoom(config.code);
           }
         }
@@ -993,16 +1000,16 @@ export class GameRoomDO extends DurableObject<Env> {
   async getFullStateForPlayer(seatIndex: number): Promise<GameState> {
     const gameState = this.getGameState();
     const players = this.getAllPlayers();
-    const topCard = gameState ? JSON.parse(gameState.top_card) : {};
+    const topCard = gameState ? JSON.parse(gameState.top_card || "{}") : {};
     const deck = gameState ? JSON.parse(gameState.deck) : [];
 
-    // Get room config for type
-    const configRow = this.ctx.storage.sql.exec("SELECT type FROM room_config LIMIT 1").one() as any;
+    // Get room config for type and max_players
+    const configRow = this.ctx.storage.sql.exec<{ type: string, max_players: number }>("SELECT type, max_players FROM room_config LIMIT 1").one();
 
     // Get play history (last 30 entries)
-    const historyRows = this.ctx.storage.sql.exec(
-      "SELECT seat_index, username, card, timestamp, combo_card FROM play_history ORDER BY id DESC LIMIT 30"
-    ).toArray() as any[];
+    const historyRows = this.ctx.storage.sql.exec<PlayHistoryRow>(
+      "SELECT seat_index, username, card, timestamp, combo_card FROM play_history ORDER BY id DESC LIMIT " + PLAY_HISTORY_LIMIT
+    ).toArray();
     const playHistory = historyRows.reverse().map(r => ({
       seatIndex: r.seat_index,
       username: r.username,
@@ -1012,17 +1019,18 @@ export class GameRoomDO extends DurableObject<Env> {
     }));
 
     return {
-      phase: gameState?.phase || "waiting",
-      currentSeat: gameState?.current_seat,
-      direction: gameState?.direction,
-      topCard: topCard,
+      phase: (gameState?.phase as GameState["phase"]) || "waiting",
+      currentSeat: gameState?.current_seat ?? undefined as unknown as number,
+      direction: (gameState?.direction ?? 1) as 1 | -1,
+      topCard: topCard as Card,
       deckCount: deck.length,
-      wildColor: gameState?.wild_color,
-      drawAccumulated: gameState?.draw_accumulated,
-      winnerSeat: gameState?.winner_seat,
-      countdownEnd: gameState?.countdown_end,
+      wildColor: (gameState?.wild_color ?? undefined) as CardColor | undefined,
+      drawAccumulated: gameState?.draw_accumulated ?? 0,
+      winnerSeat: gameState?.winner_seat ?? undefined as unknown as number | undefined,
+      countdownEnd: gameState?.countdown_end ?? undefined as unknown as number | undefined,
       minValue: gameState?.min_value !== undefined ? gameState.min_value : -1,
-      roomType: configRow?.type || undefined,
+      roomType: (configRow?.type as "public" | "private" | "quick" | undefined) || undefined,
+      maxPlayers: configRow?.max_players,
       players: players.map(p => ({
         seatIndex: p.seatIndex,
         username: p.username,
@@ -1048,10 +1056,10 @@ export class GameRoomDO extends DurableObject<Env> {
   }
 
   private ensureIdleAlarm(force: boolean = false): void {
-    const existing = this.ctx.storage.sql.exec("SELECT last_activity FROM room_config LIMIT 1").one() as any;
+    const existing = this.ctx.storage.sql.exec<{ last_activity: number }>("SELECT last_activity FROM room_config LIMIT 1").one();
     const lastActivity = existing?.last_activity ?? 0;
     const elapsed = Date.now() - lastActivity;
-    const checkInterval = 30000;
+    const checkInterval = IDLE_CHECK_INTERVAL_MS;
     if (force || lastActivity === 0 || elapsed < checkInterval) {
       this.ctx.storage.setAlarm(Date.now() + checkInterval);
     }
@@ -1086,12 +1094,12 @@ async function handleGame(request: Request, env: Env, pathname: string): Promise
   const code = parts[3];
   const action = parts[4];
 
-  if (!code || code.length !== 6) {
+  if (!code || code.length !== ROOM_CODE_LENGTH) {
     return Response.json({ error: "无效的房间码" }, { status: 400 });
   }
 
   const gameRoomId = env.GAME_ROOM_DO.idFromName(code);
-  const stub = env.GAME_ROOM_DO.get(gameRoomId);
+  const stub = env.GAME_ROOM_DO.get(gameRoomId) as unknown as DurableObjectStub<GameRoomDOv2>;
 
   if (action === "state") {
     const state = await stub.getFullStateForPlayer(-1);
