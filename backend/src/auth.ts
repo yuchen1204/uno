@@ -56,7 +56,8 @@ export async function handleRegister(request: Request, env: Env): Promise<Respon
     const token = await createSession(id, username, env);
     return Response.json({ token, username, score: 0 });
   } catch (e: any) {
-    return Response.json({ error: e.message || "注册失败", stack: e.stack }, { status: 500 });
+    console.error("handleRegister error:", e);
+    return Response.json({ error: e.message || "注册失败" }, { status: 500 });
   }
 }
 
@@ -78,7 +79,8 @@ export async function handleLogin(request: Request, env: Env): Promise<Response>
     const token = await createSession(user.id, user.username, env);
     return Response.json({ token, username: user.username, score: user.score });
   } catch (e: any) {
-    return Response.json({ error: e.message || "登录失败", stack: e.stack }, { status: 500 });
+    console.error("handleLogin error:", e);
+    return Response.json({ error: e.message || "登录失败" }, { status: 500 });
   }
 }
 
