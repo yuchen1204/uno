@@ -49,6 +49,7 @@ export interface GameState {
   countdownEnd?: number;
   minValue?: number;
   roomType?: "public" | "private" | "quick";
+  maxPlayers?: number;
   players: PlayerInfo[];
   playHistory?: PlayHistory[];
 }
@@ -74,7 +75,7 @@ export interface PlayerInfo {
 
 export interface PlayerFull {
   seatIndex: number;
-  user_id: string | null;
+  userId: string | null;
   username: string;
   hand: Card[];
   isHost: boolean;
