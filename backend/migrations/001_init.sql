@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS rooms (
   type TEXT NOT NULL,
   host_id TEXT,
   status TEXT NOT NULL DEFAULT 'waiting',
+  max_players INTEGER NOT NULL DEFAULT 4,
   created_at TEXT NOT NULL,
   finished_at TEXT
 );

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { api } from "../api";
 import { RoomType } from "../types";
+import { useAuth } from "../AuthContext";
 
 interface Props {
   onClose: () => void;
@@ -8,20 +9,23 @@ interface Props {
 }
 
 export default function CreateRoomModal({ onClose, onCreated }: Props) {
+  const { user } = useAuth();
   const [type, setType] = useState<RoomType>("public");
-  const [nickname, setNickname] = useState("");
+  const [maxPlayers, setMaxPlayers] = useState<number>(4);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
+  const isLoggedIn = !!user;
+
   const handleCreate = async () => {
     setError("");
-    if (type === "quick" && !nickname.trim()) {
-      setError("快速房间需要设置用户标识符");
-      return;
-    }
     setLoading(true);
     try {
-      const result = await api.createRoom(type, type === "quick" ? nickname : undefined);
+      const result = await api.createRoom(
+        type,
+        type === "quick" ? user!.username : undefined,
+        maxPlayers
+      );
       onCreated(result.code);
     } catch (err: any) {
       setError(err.message || "创建失败");
@@ -49,14 +53,18 @@ export default function CreateRoomModal({ onClose, onCreated }: Props) {
           </label>
         </div>
 
-        {type === "quick" && (
-          <input
-            type="text"
-            placeholder="输入你的昵称"
-            value={nickname}
-            onChange={e => setNickname(e.target.value)}
-          />
-        )}
+        <div style={{ marginBottom: 16 }}>
+          <h4>最大人数</h4>
+          <label style={{ marginRight: 16 }}>
+            <input type="radio" checked={maxPlayers === 2} onChange={() => setMaxPlayers(2)} /> 2人
+          </label>
+          <label style={{ marginRight: 16 }}>
+            <input type="radio" checked={maxPlayers === 3} onChange={() => setMaxPlayers(3)} /> 3人
+          </label>
+          <label>
+            <input type="radio" checked={maxPlayers === 4} onChange={() => setMaxPlayers(4)} /> 4人
+          </label>
+        </div>
 
         {error && <div className="error">{error}</div>}
 

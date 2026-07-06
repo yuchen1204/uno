@@ -1,4 +1,4 @@
-import { AuthResponse, Room, GameState, LeaderboardEntry, CardColor, Card } from "./types";
+import { AuthResponse, Room, GameState, LeaderboardEntry, CardColor, Card, RoomType } from "./types";
 
 const API_BASE = "/api";
 
@@ -67,10 +67,10 @@ export const api = {
     clearToken();
   },
 
-  createRoom(type: "public" | "private" | "quick", nickname?: string): Promise<{ code: string; type: string; hostName: string }> {
+  createRoom(type: RoomType, nickname?: string, maxPlayers?: number): Promise<{ code: string }> {
     return request("/rooms", {
       method: "POST",
-      body: JSON.stringify({ type, nickname }),
+      body: JSON.stringify({ type, nickname, maxPlayers }),
     });
   },
 
@@ -82,8 +82,16 @@ export const api = {
     return request(`/rooms/${code}`);
   },
 
-  joinRoom(code: string): Promise<{ seatIndex: number; playerCount: number }> {
-    return request(`/rooms/${code}/join`);
+  joinRoom(code: string, nickname?: string): Promise<{ seatIndex: number; playerCount: number }> {
+    const headers: Record<string, string> = {};
+    if (nickname) headers["X-Uno-Nickname"] = nickname;
+    return request(`/rooms/${code}/join`, { headers: Object.keys(headers).length ? headers : undefined });
+  },
+
+  leaveRoom(code: string, nickname?: string): Promise<{ success: boolean; error?: string }> {
+    const headers: Record<string, string> = {};
+    if (nickname) headers["X-Uno-Nickname"] = nickname;
+    return request(`/rooms/${code}/leave`, { headers: Object.keys(headers).length ? headers : undefined });
   },
 
   getGameState(code: string): Promise<GameState> {
@@ -94,14 +102,17 @@ export const api = {
     return request(`/game/${code}/hand?seat=${seatIndex}`);
   },
 
-  startGame(code: string): Promise<{ success: boolean; error?: string }> {
-    return request(`/game/${code}/start`, { method: "POST" });
+  startGame(code: string, seatIndex: number): Promise<{ success: boolean; error?: string }> {
+    return request(`/game/${code}/start`, {
+      method: "POST",
+      body: JSON.stringify({ seatIndex }),
+    });
   },
 
-  playerAction(code: string, seatIndex: number, action: string, cardIndex?: number, color?: CardColor): Promise<any> {
+  playerAction(code: string, seatIndex: number, action: string, cardIndex?: number, color?: CardColor, comboCardIndex?: number): Promise<any> {
     return request(`/game/${code}/action`, {
       method: "POST",
-      body: JSON.stringify({ seatIndex, action, cardIndex, color }),
+      body: JSON.stringify({ seatIndex, action, cardIndex, color, comboCardIndex }),
     });
   },
 

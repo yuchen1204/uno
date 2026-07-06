@@ -38,7 +38,7 @@ export interface Card {
 }
 
 export interface GameState {
-  phase: "waiting" | "playing" | "finished";
+  phase: "waiting" | "countdown" | "playing" | "finished";
   currentSeat: number;
   direction: 1 | -1;
   topCard: Card;
@@ -46,7 +46,19 @@ export interface GameState {
   wildColor?: CardColor;
   drawAccumulated: number;
   winnerSeat?: number;
+  countdownEnd?: number;
+  minValue?: number;
+  roomType?: "public" | "private" | "quick";
   players: PlayerInfo[];
+  playHistory?: PlayHistory[];
+}
+
+export interface PlayHistory {
+  seatIndex: number;
+  username: string;
+  card: Card;
+  timestamp: number;
+  comboCard?: Card;
 }
 
 export interface PlayerInfo {
@@ -55,7 +67,9 @@ export interface PlayerInfo {
   handCount: number;
   isHost: boolean;
   connected: boolean;
+  isReady: boolean;
   score: number;
+  skipCount: number;
 }
 
 export interface PlayerFull {
@@ -65,5 +79,7 @@ export interface PlayerFull {
   hand: Card[];
   isHost: boolean;
   connected: boolean;
+  isReady: boolean;
   score: number;
+  skipCount: number;
 }

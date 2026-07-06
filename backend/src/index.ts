@@ -88,10 +88,13 @@ export class GameRoomDO extends DurableObject<Env> {
           hand TEXT NOT NULL DEFAULT '[]',
           is_host INTEGER DEFAULT 0,
           connected INTEGER DEFAULT 1,
+          is_ready INTEGER DEFAULT 0,
           score INTEGER DEFAULT 0,
           joined_at TEXT NOT NULL
         )
       `);
+      try { ctx.storage.sql.exec("ALTER TABLE players ADD COLUMN is_ready INTEGER DEFAULT 0"); } catch {}
+      try { ctx.storage.sql.exec("ALTER TABLE players ADD COLUMN skip_count INTEGER DEFAULT 0"); } catch {}
       ctx.storage.sql.exec(`
         CREATE TABLE IF NOT EXISTS game_state (
           id INTEGER PRIMARY KEY DEFAULT 1,
@@ -103,21 +106,55 @@ export class GameRoomDO extends DurableObject<Env> {
           discard_pile TEXT NOT NULL DEFAULT '[]',
           wild_color TEXT,
           draw_accumulated INTEGER DEFAULT 0,
-          winner_seat INTEGER
+          winner_seat INTEGER,
+          countdown_end INTEGER
         )
+      `);
+      try { ctx.storage.sql.exec("ALTER TABLE game_state ADD COLUMN countdown_end INTEGER"); } catch {}
+      try { ctx.storage.sql.exec("ALTER TABLE game_state ADD COLUMN min_value INTEGER DEFAULT -1"); } catch {}
+      try { ctx.storage.sql.exec("ALTER TABLE room_config ADD COLUMN last_activity INTEGER DEFAULT 0"); } catch {}
+      ctx.storage.sql.exec(`
+        CREATE TABLE IF NOT EXISTS play_history (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          seat_index INTEGER NOT NULL,
+          username TEXT NOT NULL,
+          card TEXT NOT NULL,
+          timestamp INTEGER NOT NULL,
+          combo_card TEXT
+        )
+      `);
+      ctx.storage.sql.exec(`
+        INSERT OR IGNORE INTO game_state (id) VALUES (1)
       `);
     });
   }
 
-  async joinGame(username: string, userId: string | null): Promise<{ seatIndex: number; playerCount: number }> {
-    const config = this.ctx.storage.sql.exec("SELECT * FROM room_config").one() as any;
-    if (!config || config.status !== "waiting") throw new Error("房间不可加入");
-
+  async joinGame(code: string, username: string, userId: string | null, maxPlayers: number = 4, roomType: string = "private"): Promise<{ seatIndex: number; playerCount: number }> {
     const existingPlayers = this.ctx.storage.sql.exec(
-      "SELECT seat_index, user_id FROM players ORDER BY seat_index"
+      "SELECT seat_index, user_id, username FROM players ORDER BY seat_index"
     ).toArray() as any[];
-    const maxPlayers = config.max_players;
-    if (existingPlayers.length >= maxPlayers) throw new Error("房间已满");
+
+    const existingMe = existingPlayers.find((p: any) => userId ? p.user_id === userId : p.username === username);
+    if (existingMe) {
+      this.ctx.storage.sql.exec("UPDATE players SET connected = 1 WHERE seat_index = ?", existingMe.seat_index);
+      await this.ctx.storage.deleteAlarm();
+      this.broadcastState();
+      return { seatIndex: existingMe.seat_index, playerCount: existingPlayers.length };
+    }
+
+    const configs = this.ctx.storage.sql.exec("SELECT * FROM room_config LIMIT 1").toArray() as any[];
+    let config = configs.length > 0 ? configs[0] : null;
+    if (!config) {
+      this.ctx.storage.sql.exec(
+        "INSERT INTO room_config (code, type, max_players, status) VALUES (?, ?, ?, 'waiting')",
+        code, roomType, maxPlayers
+      );
+      config = { status: "waiting", max_players: maxPlayers, type: roomType };
+    }
+    if (config.status !== "waiting" && config.status !== "countdown") throw new Error("房间不可加入");
+
+    const roomMaxPlayers = config.max_players;
+    if (existingPlayers.length >= roomMaxPlayers) throw new Error("房间已满");
 
     const usedSeats = new Set(existingPlayers.map((p: any) => p.seat_index));
     let seatIndex = 0;
@@ -126,7 +163,7 @@ export class GameRoomDO extends DurableObject<Env> {
     const now = new Date().toISOString();
     const isHost = seatIndex === 0;
     this.ctx.storage.sql.exec(
-      "INSERT INTO players (seat_index, user_id, username, hand, is_host, joined_at) VALUES (?, ?, ?, '[]', ?, ?)",
+      "INSERT INTO players (seat_index, user_id, username, hand, is_host, connected, is_ready, joined_at) VALUES (?, ?, ?, '[]', ?, 1, 0, ?)",
       seatIndex,
       userId,
       username,
@@ -138,16 +175,109 @@ export class GameRoomDO extends DurableObject<Env> {
     return { seatIndex, playerCount: existingPlayers.length + 1 };
   }
 
-  async startGame(): Promise<{ success: boolean; error?: string }> {
+  async leaveGame(username: string, userId: string | null): Promise<{ success: boolean; error?: string; empty?: boolean; playerCount?: number }> {
+    const existingPlayers = this.ctx.storage.sql.exec(
+      "SELECT seat_index, user_id, username, hand, is_host, connected, score FROM players ORDER BY seat_index"
+    ).toArray() as any[];
+
+    const me = existingPlayers.find(p => userId ? p.user_id === userId : p.username === username);
+    if (!me) return { success: false, error: "玩家不在房间内" };
+
+    const remainingPlayers = existingPlayers.filter(p => p.seat_index !== me.seat_index);
+    const gameState = this.getGameState();
+
+    // Calculate next seat BEFORE deleting, if current player is leaving
+    let nextSeat: number | null = null;
+    if (gameState?.phase === "playing" && remainingPlayers.length >= 2 && gameState.current_seat === me.seat_index) {
+      const fullPlayers = existingPlayers.map(r => ({
+        seatIndex: r.seat_index,
+        userId: r.user_id,
+        username: r.username,
+        hand: JSON.parse(r.hand) as Card[],
+        isHost: r.is_host === 1,
+        connected: r.connected === 1,
+        isReady: r.is_ready === 1,
+        score: r.score,
+      }));
+      nextSeat = this.getNextSeat(me.seat_index, gameState.direction, fullPlayers);
+    }
+
+    this.ctx.storage.sql.exec("DELETE FROM players WHERE seat_index = ?", me.seat_index);
+
+    // Check countdown cancellation
+    if (gameState?.phase === "countdown") {
+      this.ctx.storage.sql.exec("UPDATE game_state SET phase = 'waiting', countdown_end = 0");
+      this.ctx.storage.sql.exec("UPDATE room_config SET status = 'waiting'");
+    }
+    if (remainingPlayers.length === 0) {
+      this.ctx.storage.sql.exec("DELETE FROM room_config");
+      this.ctx.storage.sql.exec("DELETE FROM game_state");
+      return { success: true, empty: true };
+    }
+
+    if (gameState?.phase === "playing" && remainingPlayers.length === 1) {
+      const winner = remainingPlayers[0];
+      const allPlayersForScore = existingPlayers.map(r => ({
+        seatIndex: r.seat_index,
+        userId: r.user_id,
+        username: r.username,
+        hand: JSON.parse(r.hand) as Card[],
+        isHost: r.is_host === 1,
+        connected: r.connected === 1,
+        isReady: r.is_ready === 1,
+        score: r.score,
+      }));
+      await this.finishGame(winner.seat_index, allPlayersForScore, 0, 0);
+    }
+
+    if (me.is_host === 1) {
+      const newHost = remainingPlayers[0];
+      this.ctx.storage.sql.exec("UPDATE players SET is_host = 1 WHERE seat_index = ?", newHost.seat_index);
+    }
+
+    // If the leaving player is the current player, skip to next
+    if (nextSeat !== null) {
+      this.ctx.storage.sql.exec("UPDATE game_state SET current_seat = ?, min_value = -1, draw_accumulated = 0 WHERE id = 1", nextSeat);
+    }
+
+    this.broadcastState();
+    return { success: true, empty: false, playerCount: remainingPlayers.length };
+  }
+
+  async handleStartGame(): Promise<{ success: boolean; error?: string }> {
+    const gameState = this.getGameState();
+    if (gameState?.phase !== "waiting") return { success: false, error: "当前不能开始" };
+
+    const players = this.getAllPlayers();
+    if (players.length < 2) return { success: false, error: "玩家人数不足" };
+
+    this.ctx.storage.sql.exec("UPDATE game_state SET phase = 'countdown', countdown_end = ?", Date.now() + 3000);
+    this.ctx.storage.sql.exec("UPDATE room_config SET status = 'countdown'");
+    setTimeout(() => {
+      this.actualStartGame().catch(console.error);
+    }, 3000);
+    this.broadcastState();
+    return { success: true };
+  }
+
+  async actualStartGame(): Promise<{ success: boolean; error?: string }> {
     const config = this.ctx.storage.sql.exec("SELECT * FROM room_config").one() as any;
     if (!config) return { success: false, error: "房间未初始化" };
+
+    const gameState = this.getGameState();
+    if (gameState?.phase !== "countdown") return { success: false, error: "不在倒数阶段" };
 
     const players = this.ctx.storage.sql.exec(
       "SELECT * FROM players ORDER BY seat_index"
     ).toArray() as any[];
-    if (players.length < config.min_players) {
+    if (players.length < 2) {
+      this.ctx.storage.sql.exec("UPDATE game_state SET phase = 'waiting', countdown_end = 0");
+      this.broadcastState();
       return { success: false, error: "玩家人数不足" };
     }
+
+    // Clear play history for new game
+    this.ctx.storage.sql.exec("DELETE FROM play_history");
 
     let deck = shuffleDeck(createDeck());
 
@@ -173,7 +303,7 @@ export class GameRoomDO extends DurableObject<Env> {
     }
 
     this.ctx.storage.sql.exec(
-      "UPDATE game_state SET phase = 'playing', current_seat = 0, direction = 1, top_card = ?, deck = ?, discard_pile = '[]', wild_color = ?, draw_accumulated = 0 WHERE id = 1",
+      "UPDATE game_state SET phase = 'playing', current_seat = 0, direction = 1, top_card = ?, deck = ?, discard_pile = '[]', wild_color = ?, draw_accumulated = 0, min_value = -1 WHERE id = 1",
       JSON.stringify(topCard),
       JSON.stringify(deck),
       wildColor || null,
@@ -182,11 +312,37 @@ export class GameRoomDO extends DurableObject<Env> {
     this.ctx.storage.sql.exec("UPDATE room_config SET status = 'playing'");
     await this.updateD1RoomStatus(config.code, "playing");
 
+    if (config.type === "public") {
+      const lobbyId = this.env.LOBBY_DO.idFromName("global_v2");
+      const lobbyStub = this.env.LOBBY_DO.get(lobbyId);
+      await lobbyStub.removeRoom(config.code);
+    }
+
     this.broadcastState();
     return { success: true };
   }
 
-  async playerAction(seatIndex: number, action: string, payload?: any): Promise<{ success: boolean; error?: string; scoreChange?: number; targetSeat?: number }> {
+  async playerAction(seatIndex: number, action: string, payload?: any, verify: { username?: string; userId?: string } = {}): Promise<{ success: boolean; error?: string; scoreChange?: number; targetSeat?: number }> {
+    // Verify that the requestor owns the seat
+    const players = this.getAllPlayers();
+    const player = players.find(p => p.seatIndex === seatIndex);
+    if (!player) return { success: false, error: "玩家不存在" };
+    const seatOwnerId = verify.userId || null;
+    const seatOwnerName = verify.username || null;
+    if (seatOwnerId && player.userId && seatOwnerId !== player.userId) {
+      return { success: false, error: "不是你的座位" };
+    }
+    if (seatOwnerName && seatOwnerName !== player.username) {
+      return { success: false, error: "不是你的座位" };
+    }
+
+    if (action === "toggle_ready") {
+      return this.toggleReady(seatIndex);
+    }
+    if (action === "continue_game") {
+      return this.continueGame(seatIndex);
+    }
+
     const gameState = this.getGameState();
     if (!gameState || gameState.phase !== "playing") {
       return { success: false, error: "游戏未进行中" };
@@ -195,12 +351,10 @@ export class GameRoomDO extends DurableObject<Env> {
       return { success: false, error: "不是你的回合" };
     }
 
-    const players = this.getAllPlayers();
-    const player = players.find(p => p.seatIndex === seatIndex);
-    if (!player) return { success: false, error: "玩家不存在" };
-
     if (action === "draw_card") {
       return this.handleDrawCard(player, players, gameState);
+    } else if (action === "skip_turn") {
+      return this.handleSkipTurn(player, players, gameState);
     } else if (action === "play_card") {
       return this.handlePlayCard(player, players, gameState, payload);
     } else if (action === "say_uno") {
@@ -209,64 +363,275 @@ export class GameRoomDO extends DurableObject<Env> {
     return { success: false, error: "无效操作" };
   }
 
+  private async toggleReady(seatIndex: number): Promise<{ success: boolean; error?: string }> {
+    const gameState = this.getGameState();
+    if (gameState?.phase !== "waiting") return { success: false, error: "当前不能准备" };
+
+    const players = this.getAllPlayers();
+    const me = players.find(p => p.seatIndex === seatIndex);
+    if (!me) return { success: false, error: "玩家不存在" };
+
+    const newReadyState = me.isReady ? 0 : 1;
+    this.ctx.storage.sql.exec("UPDATE players SET is_ready = ? WHERE seat_index = ?", newReadyState, seatIndex);
+    
+    // Check auto-start conditions
+    const updatedPlayers = this.getAllPlayers();
+    const connectedPlayers = updatedPlayers.filter(p => p.connected);
+    const allReady = connectedPlayers.every(p => p.isReady);
+    const config = this.ctx.storage.sql.exec("SELECT max_players FROM room_config LIMIT 1").one() as any;
+    const maxPlayers = config?.max_players ?? 4;
+    const isFull = connectedPlayers.length >= maxPlayers;
+    
+    // Auto-start if:
+    //   - all connected players are ready (at least 2 players)
+    //   - or host starts manually
+    if (allReady && connectedPlayers.length >= 2) {
+      this.ctx.storage.sql.exec("UPDATE game_state SET phase = 'countdown', countdown_end = ?", Date.now() + 3000);
+      this.ctx.storage.sql.exec("UPDATE room_config SET status = 'countdown'");
+      setTimeout(() => {
+        this.actualStartGame().catch(console.error);
+      }, 3000);
+    }
+
+    this.broadcastState();
+    return { success: true };
+  }
+
+  private async continueGame(seatIndex: number): Promise<{ success: boolean; error?: string }> {
+    const gameState = this.getGameState();
+    if (gameState?.phase !== "finished") return { success: false, error: "游戏未结束" };
+
+    // Reset game state for everyone to waiting
+    this.ctx.storage.sql.exec("UPDATE game_state SET phase = 'waiting', deck = '[]', discard_pile = '[]', top_card = NULL, wild_color = NULL, current_seat = NULL, winner_seat = NULL, draw_accumulated = 0, countdown_end = 0, min_value = -1");
+    this.ctx.storage.sql.exec("UPDATE room_config SET status = 'waiting'");
+    
+    // Reset all players to not ready, but the one who clicked continue is ready
+    this.ctx.storage.sql.exec("UPDATE players SET is_ready = 0, hand = '[]', skip_count = 0");
+    this.ctx.storage.sql.exec("UPDATE players SET is_ready = 1 WHERE seat_index = ?", seatIndex);
+    
+    this.broadcastState();
+    return { success: true };
+  }
+
   private handleDrawCard(player: PlayerFull, players: PlayerFull[], state: any): { success: boolean; error?: string; scoreChange?: number } {
-    const deck = JSON.parse(state.deck) as Card[];
+    let deck = JSON.parse(state.deck) as Card[];
     const wildColor = state.wild_color ? (state.wild_color as CardColor) : undefined;
     const topCard = JSON.parse(state.top_card) as Card;
 
-    const canPlay = player.hand.some(c => canPlayCard(c, topCard, player.hand, wildColor));
-    if (canPlay) {
-      return { success: false, error: "你还有可出的牌，不能摸牌" };
+    if (state.draw_accumulated > 0) {
+      // Must draw all accumulated cards and pass turn
+      let drawCount = state.draw_accumulated;
+      let drawn: Card[] = [];
+      while (drawCount > 0) {
+        if (deck.length === 0) {
+          const reshuffled = this.reshuffleDiscard(deck, state);
+          if (reshuffled) {
+            deck = reshuffled;
+          } else {
+            break;
+          }
+        }
+        const take = Math.min(drawCount, deck.length);
+        drawn.push(...deck.slice(0, take));
+        deck = deck.slice(take);
+        drawCount -= take;
+      }
+      const newHand = [...player.hand, ...drawn];
+      this.updatePlayerHand(player.seatIndex, newHand);
+      this.updateDeck(deck);
+
+      this.ctx.storage.sql.exec("UPDATE game_state SET draw_accumulated = 0, min_value = -1 WHERE id = 1");
+      this.broadcastState();
+      return { success: true };
+    }
+
+    const hasMatchingNormal = player.hand.some(c => 
+      c.type !== "wild" && 
+      c.type !== "wild4" && 
+      canPlayCard(c, topCard, player.hand, wildColor, 0, state.min_value)
+    );
+    if (hasMatchingNormal) {
+      return { success: false, error: "你手牌里有相同颜色或数字的牌，必须出牌" };
     }
 
     if (deck.length === 0) {
-      return { success: false, error: "牌堆已空" };
+      const reshuffled = this.reshuffleDiscard(deck, state);
+      if (reshuffled) {
+        deck = reshuffled;
+      } else {
+        // No cards to reshuffle — skip turn
+        this.ctx.storage.sql.exec("UPDATE game_state SET min_value = -1 WHERE id = 1");
+        const updatedState = { ...state, min_value: -1 };
+        this.advanceToNext(updatedState, players);
+        this.broadcastState();
+        return { success: true };
+      }
     }
+
     const drawnCard = deck[0];
     const newDeck = deck.slice(1);
     const newHand = [...player.hand, drawnCard];
 
     this.updatePlayerHand(player.seatIndex, newHand);
     this.updateDeck(newDeck);
+    
+    // Draw resets min_value comparison chain
+    this.ctx.storage.sql.exec("UPDATE game_state SET min_value = -1 WHERE id = 1");
 
-    if (canPlayCard(drawnCard, topCard, [drawnCard], wildColor)) {
-      const playCard = newHand.pop()!;
-      return this.executePlayCard(player, players, state, playCard, { seatIndex: player.seatIndex, hand: newHand, deck: newDeck, topCard, wildColor });
-    }
-
-    this.advanceToNext(state, players);
     this.broadcastState();
     return { success: true };
   }
 
-  handlePlayCard(player: PlayerFull, players: PlayerFull[], state: any, payload: { cardIndex: number; color?: CardColor }): { success: boolean; error?: string; scoreChange?: number; targetSeat?: number } {
+  private handleSkipTurn(player: PlayerFull, players: PlayerFull[], state: any): { success: boolean; error?: string; scoreChange?: number } {
+    if (state.draw_accumulated > 0) {
+      return { success: false, error: "惩罚状态下不能跳过" };
+    }
+
+    const skipCount = player.skipCount ?? 0;
+    if (skipCount >= 3) {
+      return { success: false, error: "已跳过3次，必须摸牌" };
+    }
+
+    this.ctx.storage.sql.exec("UPDATE players SET skip_count = skip_count + 1 WHERE seat_index = ?", player.seatIndex);
+    this.ctx.storage.sql.exec("UPDATE game_state SET min_value = -1, draw_accumulated = 0 WHERE id = 1");
+    const updatedState = { ...state, min_value: -1, draw_accumulated: 0 };
+    this.advanceToNext(updatedState, players);
+    this.broadcastState();
+    return { success: true };
+  }
+
+  handlePlayCard(
+    player: PlayerFull,
+    players: PlayerFull[],
+    state: any,
+    payload: { cardIndex: number; color?: CardColor; comboCardIndex?: number }
+  ): { success: boolean; error?: string; scoreChange?: number; targetSeat?: number } {
     const card = player.hand[payload.cardIndex];
     if (!card) return { success: false, error: "无效的牌" };
 
     const wildColor = state.wild_color ? (state.wild_color as CardColor) : undefined;
     const topCard = JSON.parse(state.top_card) as Card;
 
-    if (!canPlayCard(card, topCard, player.hand, wildColor)) {
+    if (!canPlayCard(card, topCard, player.hand, wildColor, state.draw_accumulated, state.min_value)) {
       return { success: false, error: "不能出这张牌" };
     }
 
-    return this.executePlayCard(player, players, state, card, { seatIndex: player.seatIndex, hand: player.hand, deck: JSON.parse(state.deck), topCard, wildColor, chosenColor: payload.color });
+    // 1. Handle Wild/Wild4 Combo Card logic
+    if (card.type === "wild" || card.type === "wild4") {
+      if (player.hand.length === 1) {
+        // Last card is wild: draw 2 penalty cards, cannot win directly
+        const deck = JSON.parse(state.deck) as Card[];
+        const count = Math.min(2, deck.length);
+        const drawn = deck.slice(0, count);
+        const newDeck = deck.slice(count);
+        
+        // Remove wild card and add 2 drawn cards
+        const newHand = player.hand.filter((_, i) => i !== payload.cardIndex).concat(drawn);
+        this.updatePlayerHand(player.seatIndex, newHand);
+        this.updateDeck(newDeck);
+
+        // Put wild card on top
+        const discardPile = JSON.parse(state.discard_pile) as Card[];
+        discardPile.push(topCard);
+
+        const nextSeat = this.getNextSeat(player.seatIndex, state.direction, players);
+        this.ctx.storage.sql.exec(
+          "UPDATE game_state SET current_seat = ?, top_card = ?, deck = ?, discard_pile = ?, wild_color = ?, min_value = -1 WHERE id = 1",
+          nextSeat,
+          JSON.stringify(card),
+          JSON.stringify(newDeck),
+          JSON.stringify(discardPile),
+          payload.color || "red"
+        );
+
+        this.broadcastState();
+        return { success: true };
+      }
+
+      // Must discard a second colored card from hand
+      if (payload.comboCardIndex === undefined) {
+        return { success: false, error: "请选择一张有色牌一起出！" };
+      }
+      if (payload.comboCardIndex === payload.cardIndex) {
+        return { success: false, error: "不能选择自身作为连携牌！" };
+      }
+      const comboCard = player.hand[payload.comboCardIndex];
+      if (!comboCard || comboCard.type === "wild" || comboCard.type === "wild4") {
+        return { success: false, error: "伴随丢出的牌必须是有色牌！" };
+      }
+
+      // If in defense mode, check if defense is valid
+      if (state.draw_accumulated > 0) {
+        if (card.type === "wild4") {
+          // Wild4 is valid defense
+        } else if (card.type === "wild" && comboCard.type === "draw2") {
+          // Wild + Draw2 is valid defense
+        } else {
+          return { success: false, error: "防守状态下，连携牌必须是+2以防御惩罚！" };
+        }
+      }
+
+      // Execute Wild Combo Play
+      const newHand = player.hand.filter((_, i) => i !== payload.cardIndex && i !== payload.comboCardIndex);
+      this.updatePlayerHand(player.seatIndex, newHand);
+
+      const deck = JSON.parse(state.deck) as Card[];
+      const discardPile = JSON.parse(state.discard_pile) as Card[];
+      discardPile.push(card); // push wild card
+
+      const nextSeat = this.getNextSeat(player.seatIndex, state.direction, players);
+      let addedPenalty = card.type === "wild4" ? 4 : 0;
+      if (comboCard.type === "draw2") addedPenalty += 2;
+
+      const newDrawAccumulated = state.draw_accumulated + addedPenalty;
+      const newMinValue = comboCard.value !== undefined ? comboCard.value : -1;
+
+      // Insert play history for combo
+      this.ctx.storage.sql.exec(
+        "INSERT INTO play_history (seat_index, username, card, timestamp, combo_card) VALUES (?, ?, ?, ?, ?)",
+        player.seatIndex,
+        player.username,
+        JSON.stringify(comboCard),
+        Date.now(),
+        JSON.stringify(card)
+      );
+
+      this.ctx.storage.sql.exec(
+        "UPDATE game_state SET current_seat = ?, top_card = ?, deck = ?, discard_pile = ?, wild_color = ?, draw_accumulated = ?, min_value = ? WHERE id = 1",
+        nextSeat,
+        JSON.stringify(comboCard),
+        JSON.stringify(deck),
+        JSON.stringify(discardPile),
+        comboCard.color,
+        newDrawAccumulated,
+        newMinValue
+      );
+
+      if (newHand.length === 0) {
+        this.finishGame(player.seatIndex, players, cardToScore(comboCard), 50);
+        return { success: true };
+      }
+
+      this.broadcastState();
+      return { success: true };
+    }
+
+    // 2. Normal Card Play
+    return this.executePlayCard(player, players, state, card, {
+      seatIndex: player.seatIndex,
+      hand: player.hand,
+      deck: JSON.parse(state.deck),
+      topCard,
+      wildColor,
+      cardIndex: payload.cardIndex
+    });
   }
 
   private executePlayCard(
     player: PlayerFull, players: PlayerFull[], state: any, card: Card,
-    ctxData: { seatIndex: number; hand: Card[]; deck: Card[]; topCard: Card; wildColor?: CardColor; chosenColor?: CardColor }
+    ctxData: { seatIndex: number; hand: Card[]; deck: Card[]; topCard: Card; wildColor?: CardColor; cardIndex: number }
   ): { success: boolean; error?: string; scoreChange?: number; targetSeat?: number } {
-    const filteredHand = ctxData.hand.filter((c, i) => {
-      if (card.type === "number" && card.value !== undefined) {
-        return !(ctxData.hand[i].type === "number" && ctxData.hand[i].value === card.value && ctxData.hand[i].color === card.color);
-      }
-      if (card.type === "wild" || card.type === "wild4") {
-        return !(ctxData.hand[i].type === card.type);
-      }
-      return !(ctxData.hand[i].type === card.type && ctxData.hand[i].color === card.color);
-    });
-
+    const filteredHand = ctxData.hand.filter((_, i) => i !== ctxData.cardIndex);
     this.updatePlayerHand(player.seatIndex, filteredHand);
 
     let newDeck = ctxData.deck;
@@ -277,8 +642,12 @@ export class GameRoomDO extends DurableObject<Env> {
     let newDirection = state.direction;
     let scoreChange = 0;
     let targetSeat: number | undefined;
-    let wildColor = ctxData.wildColor;
+    // Normal colored card always clears the wild color
+    let wildColor: CardColor | undefined = undefined;
     let skipAfter = false;
+
+    let addedPenalty = 0;
+    let newMinValue = card.value !== undefined ? card.value : -1;
 
     if (card.type === "skip") {
       targetSeat = nextSeat;
@@ -290,33 +659,36 @@ export class GameRoomDO extends DurableObject<Env> {
         targetSeat = nextSeat;
         scoreChange = 20;
         skipAfter = true;
+      } else {
+        // 3+ players: just reverse direction, next player is opposite direction
+        nextSeat = this.getNextSeat(ctxData.seatIndex, newDirection, players);
       }
     } else if (card.type === "draw2") {
-      targetSeat = nextSeat;
-      scoreChange = 20;
-      this.drawCards(nextSeat, 2);
-      skipAfter = true;
-    } else if (card.type === "wild") {
-      wildColor = ctxData.chosenColor;
-    } else if (card.type === "wild4") {
-      targetSeat = nextSeat;
-      scoreChange = 50;
-      this.drawCards(nextSeat, 4);
-      wildColor = ctxData.chosenColor;
-      skipAfter = true;
+      addedPenalty = 2;
     }
 
     const updatedCurrentSeat = skipAfter ? this.getNextSeat(nextSeat, newDirection, players) : nextSeat;
+    const newDrawAccumulated = state.draw_accumulated + addedPenalty;
+
+    // Insert play history
+    this.ctx.storage.sql.exec(
+      "INSERT INTO play_history (seat_index, username, card, timestamp) VALUES (?, ?, ?, ?)",
+      player.seatIndex,
+      player.username,
+      JSON.stringify(card),
+      Date.now()
+    );
 
     this.ctx.storage.sql.exec(
-      "UPDATE game_state SET phase = 'playing', current_seat = ?, direction = ?, top_card = ?, deck = ?, discard_pile = ?, wild_color = ?, draw_accumulated = ? WHERE id = 1",
+      "UPDATE game_state SET phase = 'playing', current_seat = ?, direction = ?, top_card = ?, deck = ?, discard_pile = ?, wild_color = ?, draw_accumulated = ?, min_value = ? WHERE id = 1",
       updatedCurrentSeat,
       newDirection,
       JSON.stringify(card),
       JSON.stringify(newDeck),
       JSON.stringify(discardPile),
       wildColor || null,
-      0,
+      newDrawAccumulated,
+      newMinValue,
     );
 
     if (filteredHand.length === 0) {
@@ -402,19 +774,22 @@ export class GameRoomDO extends DurableObject<Env> {
   }
 
   private getGameState(): any {
-    return this.ctx.storage.sql.exec("SELECT * FROM game_state WHERE id = 1").one() || null;
+    const rows = this.ctx.storage.sql.exec("SELECT * FROM game_state WHERE id = 1").toArray();
+    return rows.length > 0 ? rows[0] : null;
   }
 
   private getAllPlayers(): PlayerFull[] {
     const rows = this.ctx.storage.sql.exec("SELECT * FROM players ORDER BY seat_index").toArray() as any[];
     return rows.map(r => ({
       seatIndex: r.seat_index,
-      user_id: r.user_id,
+      userId: r.user_id,
       username: r.username,
-      hand: JSON.parse(r.hand),
+      hand: JSON.parse(r.hand) as Card[],
       isHost: r.is_host === 1,
       connected: r.connected === 1,
+      isReady: r.is_ready === 1,
       score: r.score,
+      skipCount: r.skip_count ?? 0,
     }));
   }
 
@@ -433,6 +808,21 @@ export class GameRoomDO extends DurableObject<Env> {
     );
   }
 
+  // Reshuffle discard pile (except top card) back into deck. Returns new deck or null if insufficient.
+  private reshuffleDiscard(deck: Card[], state: any): Card[] | null {
+    const discardPile = JSON.parse(state.discard_pile) as Card[];
+    if (discardPile.length < 2) return null;
+    const topDiscard = discardPile[discardPile.length - 1];
+    const reshuffleCards = discardPile.slice(0, -1);
+    const newDeck = shuffleDeck(reshuffleCards);
+    this.ctx.storage.sql.exec(
+      "UPDATE game_state SET deck = ?, discard_pile = ? WHERE id = 1",
+      JSON.stringify(newDeck),
+      JSON.stringify([topDiscard])
+    );
+    return newDeck;
+  }
+
   private advanceToNext(state: any, players: PlayerFull[]): void {
     const nextSeat = this.getNextSeat(state.current_seat, state.direction, players);
     this.ctx.storage.sql.exec(
@@ -446,18 +836,39 @@ export class GameRoomDO extends DurableObject<Env> {
     const pathname = url.pathname;
 
     if (pathname.endsWith("/stream")) {
+      let userId: string | null = null;
+      let username: string | null = null;
+      const authHeader = request.headers.get("Authorization");
+      if (authHeader && authHeader.startsWith("Bearer ")) {
+        const token = authHeader.slice(7);
+        const sessionRaw = await this.env.SESSIONS.get(`session:${token}`);
+        if (sessionRaw) {
+          const session = JSON.parse(sessionRaw);
+          userId = session.userId;
+          username = session.username;
+        } else {
+          const quickSession = await this.env.SESSIONS.get(`quick:${token}`);
+          if (quickSession) {
+            username = JSON.parse(quickSession).nickname;
+          }
+        }
+      }
+
       const { readable, writable } = new TransformStream<Uint8Array>();
       const writer = writable.getWriter();
       const encoder = new TextEncoder();
 
-      const state = this.getFullStateForPlayer(-1);
+      const state = await this.getFullStateForPlayer(-1);
       writer.write(encoder.encode(JSON.stringify(state) + "\n"));
+      writer.releaseLock();
 
       this.pendingStreams.push(writable);
       request.signal.onabort = () => {
         const idx = this.pendingStreams.indexOf(writable);
         if (idx >= 0) this.pendingStreams.splice(idx, 1);
-        writer.close().catch(() => {});
+        if (username || userId) {
+          this.markPlayerOffline(username, userId);
+        }
       };
 
       return new Response(readable, {
@@ -468,27 +879,151 @@ export class GameRoomDO extends DurableObject<Env> {
     return new Response("Not Found", { status: 404 });
   }
 
+  private async markPlayerOffline(username: string | null, userId: string | null) {
+    const existingPlayers = this.ctx.storage.sql.exec(
+      "SELECT seat_index, user_id, username FROM players"
+    ).toArray() as any[];
+
+    const me = existingPlayers.find(p => userId ? p.user_id === userId : p.username === username);
+    if (me) {
+      this.ctx.storage.sql.exec("UPDATE players SET connected = 0 WHERE seat_index = ?", me.seat_index);
+      
+      const updatedPlayers = this.getAllPlayers();
+      const activePlayers = updatedPlayers.filter(p => p.connected);
+      const gameState = this.getGameState();
+      if (activePlayers.length === 0) {
+        await this.ctx.storage.setAlarm(Date.now() + 30000);
+      } else if (activePlayers.length === 1 && gameState?.phase !== "finished") {
+        await this.ctx.storage.setAlarm(Date.now() + 30000);
+      }
+      await this.broadcastState();
+    }
+  }
+
+  async alarm() {
+    const players = this.getAllPlayers();
+    const activePlayers = players.filter(p => p.connected);
+    const gameState = this.getGameState();
+
+    const configRow = this.ctx.storage.sql.exec("SELECT code, type, last_activity FROM room_config LIMIT 1").one() as any;
+    const lastActivity = configRow?.last_activity ?? 0;
+    const elapsed = Date.now() - lastActivity;
+    const IDLE_TIMEOUT = 60000;
+
+    // Idle check: if no activity for 60 seconds, close room
+    if (lastActivity > 0 && elapsed >= IDLE_TIMEOUT) {
+      this.ctx.storage.sql.exec("UPDATE players SET score = 0, is_ready = 0");
+      // Broadcast room_closed message before deleting data
+      const closeMsg = JSON.stringify({ type: "room_closed", reason: "房间闲置超时，已关闭" }) + "\n";
+      const encoder = new TextEncoder();
+      const closeData = encoder.encode(closeMsg);
+      for (let i = 0; i < this.pendingStreams.length; i++) {
+        try {
+          const writer = this.pendingStreams[i].getWriter();
+          writer.write(closeData);
+          writer.releaseLock();
+        } catch (e) {}
+      }
+      this.pendingStreams = [];
+
+      if (configRow) {
+        await this.updateD1RoomStatus(configRow.code, "finished");
+        if (configRow.type === "public") {
+          try {
+            const lobbyId = this.env.LOBBY_DO.idFromName("global_v2");
+            const lobbyStub = this.env.LOBBY_DO.get(lobbyId);
+            await lobbyStub.removeRoom(configRow.code);
+          } catch (e) {}
+        }
+      }
+      this.ctx.storage.sql.exec("DELETE FROM players");
+      this.ctx.storage.sql.exec("DELETE FROM room_config");
+      this.ctx.storage.sql.exec("DELETE FROM game_state");
+      this.ctx.storage.sql.exec("DELETE FROM play_history");
+      return;
+    }
+
+    if (activePlayers.length === 0) {
+      if (configRow) {
+        const config = configRow;
+        await this.updateD1RoomStatus(config.code, "finished");
+        if (config.type === "public") {
+          const lobbyId = this.env.LOBBY_DO.idFromName("global_v2");
+          const lobbyStub = this.env.LOBBY_DO.get(lobbyId);
+          await lobbyStub.removeRoom(config.code);
+        }
+      }
+      this.ctx.storage.sql.exec("DELETE FROM players");
+      this.ctx.storage.sql.exec("DELETE FROM room_config");
+      this.ctx.storage.sql.exec("DELETE FROM game_state");
+    } else if (activePlayers.length === 1 && gameState?.phase !== "finished") {
+      if (gameState?.phase === "playing") {
+        const winner = activePlayers[0];
+        await this.finishGame(winner.seatIndex, players, 0, 0);
+      } else {
+        if (configRow) {
+          const config = configRow;
+          await this.updateD1RoomStatus(config.code, "finished");
+          if (config.type === "public") {
+            const lobbyId = this.env.LOBBY_DO.idFromName("global_v2");
+            const lobbyStub = this.env.LOBBY_DO.get(lobbyId);
+            await lobbyStub.removeRoom(config.code);
+          }
+        }
+        this.ctx.storage.sql.exec("DELETE FROM players");
+        this.ctx.storage.sql.exec("DELETE FROM room_config");
+        this.ctx.storage.sql.exec("DELETE FROM game_state");
+      }
+    } else {
+      // Room still active, re-arm idle alarm
+      await this.ensureIdleAlarm(true);
+    }
+  }
+
   async getFullStateForPlayer(seatIndex: number): Promise<GameState> {
     const gameState = this.getGameState();
     const players = this.getAllPlayers();
+    const topCard = gameState ? JSON.parse(gameState.top_card) : {};
+    const deck = gameState ? JSON.parse(gameState.deck) : [];
+
+    // Get room config for type
+    const configRow = this.ctx.storage.sql.exec("SELECT type FROM room_config LIMIT 1").one() as any;
+
+    // Get play history (last 30 entries)
+    const historyRows = this.ctx.storage.sql.exec(
+      "SELECT seat_index, username, card, timestamp, combo_card FROM play_history ORDER BY id DESC LIMIT 30"
+    ).toArray() as any[];
+    const playHistory = historyRows.reverse().map(r => ({
+      seatIndex: r.seat_index,
+      username: r.username,
+      card: JSON.parse(r.card),
+      timestamp: r.timestamp,
+      comboCard: r.combo_card ? JSON.parse(r.combo_card) : undefined,
+    }));
 
     return {
       phase: gameState?.phase || "waiting",
       currentSeat: gameState?.current_seat,
       direction: gameState?.direction,
-      topCard: JSON.parse(gameState?.top_card || "{}"),
-      deckCount: JSON.parse(gameState?.deck || "[]").length,
+      topCard: topCard,
+      deckCount: deck.length,
       wildColor: gameState?.wild_color,
       drawAccumulated: gameState?.draw_accumulated,
       winnerSeat: gameState?.winner_seat,
+      countdownEnd: gameState?.countdown_end,
+      minValue: gameState?.min_value !== undefined ? gameState.min_value : -1,
+      roomType: configRow?.type || undefined,
       players: players.map(p => ({
         seatIndex: p.seatIndex,
         username: p.username,
         handCount: p.hand.length,
         isHost: p.isHost,
         connected: p.connected,
+        isReady: p.isReady,
         score: p.score,
+        skipCount: p.skipCount,
       })),
+      playHistory,
     };
   }
 
@@ -498,9 +1033,25 @@ export class GameRoomDO extends DurableObject<Env> {
     return { hand: player.hand };
   }
 
-  private broadcastState(): void {
+  private touchActivity(): void {
+    this.ctx.storage.sql.exec("UPDATE room_config SET last_activity = ?", Date.now());
+  }
+
+  private ensureIdleAlarm(force: boolean = false): void {
+    const existing = this.ctx.storage.sql.exec("SELECT last_activity FROM room_config LIMIT 1").one() as any;
+    const lastActivity = existing?.last_activity ?? 0;
+    const elapsed = Date.now() - lastActivity;
+    const checkInterval = 30000;
+    if (force || lastActivity === 0 || elapsed < checkInterval) {
+      this.ctx.storage.setAlarm(Date.now() + checkInterval);
+    }
+  }
+
+  private async broadcastState(): Promise<void> {
+    this.touchActivity();
+    this.ensureIdleAlarm();
     if (this.pendingStreams.length === 0) return;
-    const state = this.getFullStateForPlayer(-1);
+    const state = await this.getFullStateForPlayer(-1);
     const data = JSON.stringify(state) + "\n";
     const encoder = new TextEncoder();
     const message = encoder.encode(data);
@@ -546,13 +1097,35 @@ async function handleGame(request: Request, env: Env, pathname: string): Promise
   }
 
   if (action === "start") {
-    const result = await stub.startGame();
+    const body = await request.json<{ seatIndex: number }>();
+    const result = await stub.handleStartGame();
     return Response.json(result);
   }
 
   if (action === "action") {
-    const body = await request.json<{ seatIndex: number; action: string; cardIndex?: number; color?: CardColor }>();
-    const result = await stub.playerAction(body.seatIndex, body.action, { cardIndex: body.cardIndex, color: body.color });
+    const body = await request.json<{ seatIndex: number; action: string; cardIndex?: number; color?: CardColor; comboCardIndex?: number }>();
+    // Resolve requestor identity
+    let verifyUsername: string | undefined;
+    let verifyUserId: string | undefined;
+    const authHeader = request.headers.get("Authorization");
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+      const token = authHeader.slice(7);
+      const sessionRaw = await env.SESSIONS.get(`session:${token}`);
+      if (sessionRaw) {
+        const session = JSON.parse(sessionRaw);
+        verifyUserId = session.userId;
+        verifyUsername = session.username;
+      } else {
+        const quickSession = await env.SESSIONS.get(`quick:${token}`);
+        if (quickSession) {
+          verifyUsername = JSON.parse(quickSession).nickname;
+        }
+      }
+    } else {
+      const nick = request.headers.get("X-Uno-Nickname");
+      if (nick) verifyUsername = nick;
+    }
+    const result = await stub.playerAction(body.seatIndex, body.action, { cardIndex: body.cardIndex, color: body.color, comboCardIndex: body.comboCardIndex }, { username: verifyUsername, userId: verifyUserId });
     return Response.json(result);
   }
 
@@ -565,18 +1138,22 @@ async function handleGame(request: Request, env: Env, pathname: string): Promise
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
-    const { pathname } = url;
+    try {
+      const url = new URL(request.url);
+      const { pathname } = url;
 
-    if (pathname === "/api/auth/register") return handleRegister(request, env);
-    if (pathname === "/api/auth/login") return handleLogin(request, env);
-    if (pathname === "/api/auth/me") return handleMe(request, env);
-    if (pathname === "/api/rooms" && request.method === "POST") return handleCreateRoom(request, env);
-    if (pathname === "/api/rooms" && request.method === "GET") return handleListRooms(request, env);
-    if (pathname.startsWith("/api/rooms/")) return handleRoomDetail(request, env, pathname);
-    if (pathname === "/api/leaderboard") return handleLeaderboard(request, env);
-    if (pathname.startsWith("/api/game/")) return handleGame(request, env, pathname);
+      if (pathname === "/api/auth/register") return await handleRegister(request, env);
+      if (pathname === "/api/auth/login") return await handleLogin(request, env);
+      if (pathname === "/api/auth/me") return await handleMe(request, env);
+      if (pathname === "/api/rooms" && request.method === "POST") return await handleCreateRoom(request, env);
+      if (pathname === "/api/rooms" && request.method === "GET") return await handleListRooms(request, env);
+      if (pathname.startsWith("/api/rooms/")) return await handleRoomDetail(request, env, pathname);
+      if (pathname === "/api/leaderboard") return await handleLeaderboard(request, env);
+      if (pathname.startsWith("/api/game/")) return await handleGame(request, env, pathname);
 
-    return new Response("Not Found", { status: 404 });
+      return new Response("Not Found", { status: 404 });
+    } catch (e: any) {
+      return Response.json({ error: e.message || "内部服务器错误" }, { status: 500 });
+    }
   },
 };

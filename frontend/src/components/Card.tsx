@@ -4,6 +4,8 @@ interface Props {
   card: CardType;
   onClick?: () => void;
   small?: boolean;
+  playable?: boolean;
+  selected?: boolean;
 }
 
 const COLOR_LABELS: Record<CardColor, string> = {
@@ -13,7 +15,7 @@ const COLOR_LABELS: Record<CardColor, string> = {
 function getCardLabel(card: CardType): string {
   if (card.type === "number" && card.value !== undefined) return String(card.value);
   const labels: Record<string, string> = {
-    skip: "跳", reverse: "反", draw2: "+2", wild: "变", wild4: "+4",
+    skip: "⊘", reverse: "⇄", draw2: "+2", wild: "🌈", wild4: "+4",
   };
   return labels[card.type] || "?";
 }
@@ -23,23 +25,24 @@ function getCardColor(card: CardType): string {
   return card.color || "wild";
 }
 
-export default function CardComponent({ card, onClick, small }: Props) {
+export default function CardComponent({ card, onClick, small, playable, selected }: Props) {
   const style: React.CSSProperties = small
-    ? { width: 56, height: 84, fontSize: 14 }
-    : {};
+    ? { width: 60, height: 90, fontSize: 12 }
+    : { fontSize: 20 };
+
+  const label = getCardLabel(card);
 
   return (
     <div
-      className={`card ${getCardColor(card)}`}
+      className={`card ${getCardColor(card)} ${playable ? "playable" : ""} ${selected ? "selected" : ""}`}
       style={style}
       onClick={onClick}
     >
-      <div className="value">{getCardLabel(card)}</div>
-      {card.color && (
-        <div style={{ fontSize: 10, opacity: 0.7 }}>
-          {COLOR_LABELS[card.color]}
-        </div>
-      )}
+      <div className="card-corner top-left">{label}</div>
+      <div className="card-inner">
+        <div className="value">{label}</div>
+      </div>
+      <div className="card-corner bottom-right">{label}</div>
     </div>
   );
 }
