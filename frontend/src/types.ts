@@ -51,6 +51,7 @@ export interface GameState {
   countdownEnd?: number;
   minValue?: number;
   roomType?: RoomType;
+  maxPlayers?: number;
   players: PlayerInfo[];
   playHistory?: PlayHistory[];
 }

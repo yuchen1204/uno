@@ -4,6 +4,9 @@
   "main": "src/index.ts",
   "compatibility_date": "2025-12-01",
   "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": false
+  },
   "assets": {
     "directory": "../frontend/dist",
     "binding": "ASSETS",
@@ -25,12 +28,13 @@
   ],
   "durable_objects": {
     "bindings": [
-      { "name": "LOBBY_DO", "class_name": "LobbyDO" },
-      { "name": "GAME_ROOM_DO", "class_name": "GameRoomDO" }
+      { "name": "LOBBY_DO", "class_name": "LobbyDOv2" },
+      { "name": "GAME_ROOM_DO", "class_name": "GameRoomDOv2" }
     ]
   },
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["LobbyDO", "GameRoomDO"] }
+    { "tag": "v1", "new_sqlite_classes": ["LobbyDO", "GameRoomDO"] },
+    { "tag": "v2", "deleted_classes": ["LobbyDO", "GameRoomDO"], "new_sqlite_classes": ["LobbyDOv2", "GameRoomDOv2"] }
   ],
   "routes": [
     { "pattern": "uno.grayzone.studio", "custom_domain": true }

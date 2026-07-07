@@ -1,0 +1,14 @@
+export const ROOM_CODE_LENGTH = 6;
+export const COUNTDOWN_DURATION_MS = 3000;
+export const IDLE_TIMEOUT_MS = 180000;
+export const DISCONNECT_TIMEOUT_MS = 30000;
+export const IDLE_CHECK_INTERVAL_MS = 30000;
+export const INITIAL_HAND_SIZE = 7;
+export const LEADERBOARD_DEFAULT_LIMIT = 100;
+export const LEADERBOARD_MAX_LIMIT = 200;
+export const MAX_SKIP_COUNT = 3;
+export const MAX_PLAYERS = 4;
+export const MIN_PLAYERS = 2;
+export const PLAY_HISTORY_LIMIT = 30;
+export const LAST_CARD_WILD_PENALTY = 2;
+export const SESSION_TTL_DAYS = 7;

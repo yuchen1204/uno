@@ -4,6 +4,7 @@ import LoginModal from "./components/LoginModal";
 import Lobby from "./components/Lobby";
 import GameScreen from "./components/GameScreen";
 import Leaderboard from "./components/Leaderboard";
+import ErrorBoundary from "./components/ErrorBoundary";
 
 export default function App() {
   const { user, loading } = useAuth();
@@ -51,7 +52,8 @@ export default function App() {
       </header>
 
       <main className="app-main">
-        {page === "lobby" && (
+        <ErrorBoundary>
+          {page === "lobby" && (
           <Lobby
             onJoinGame={(code) => {
               updateRoomCode(code);
@@ -69,6 +71,7 @@ export default function App() {
           />
         )}
         {page === "leaderboard" && <Leaderboard />}
+        </ErrorBoundary>
       </main>
     </div>
   );
