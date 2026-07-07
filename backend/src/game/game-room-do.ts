@@ -282,7 +282,7 @@ export class GameRoomDOv2 extends DurableObject<Env> {
     }
 
     this.ctx.storage.sql.exec(
-      "UPDATE game_state SET phase = 'playing', current_seat = 0, direction = 1, top_card = ?, deck = ?, discard_pile = '[]', wild_color = ?, draw_accumulated = 0, min_value = -1 WHERE id = 1",
+      "UPDATE game_state SET phase = 'playing', current_seat = 0, direction = 1, top_card = ?, deck = ?, discard_pile = '[]', wild_color = ?, draw_accumulated = 0, min_value = -1, void_proposal_seat = NULL, void_proposal_timeout = NULL, voided = 0 WHERE id = 1",
       JSON.stringify(topCard),
       JSON.stringify(deck),
       wildColor || null,
@@ -408,7 +408,7 @@ export class GameRoomDOv2 extends DurableObject<Env> {
     const gameState = this.getGameState();
     if (gameState?.phase !== "finished") return { success: false, error: "游戏未结束" };
 
-    this.ctx.storage.sql.exec("UPDATE game_state SET phase = 'waiting', deck = '[]', discard_pile = '[]', top_card = NULL, wild_color = NULL, current_seat = NULL, winner_seat = NULL, draw_accumulated = 0, countdown_end = 0, min_value = -1");
+    this.ctx.storage.sql.exec("UPDATE game_state SET phase = 'waiting', deck = '[]', discard_pile = '[]', top_card = NULL, wild_color = NULL, current_seat = NULL, winner_seat = NULL, draw_accumulated = 0, countdown_end = 0, min_value = -1, void_proposal_seat = NULL, void_proposal_timeout = NULL, voided = 0");
     this.ctx.storage.sql.exec("UPDATE room_config SET status = 'waiting'");
     this.ctx.storage.sql.exec("UPDATE players SET is_ready = 0, hand = '[]', skip_count = 0");
     this.ctx.storage.sql.exec("UPDATE players SET is_ready = 1 WHERE seat_index = ?", seatIndex);
@@ -965,9 +965,21 @@ export class GameRoomDOv2 extends DurableObject<Env> {
       return;
     }
 
+    // Check void proposal timeout
+    const gameState = this.getGameState();
+    if (gameState?.void_proposal_seat != null && gameState.void_proposal_timeout != null) {
+      if (Date.now() >= gameState.void_proposal_timeout) {
+        this.ctx.storage.sql.exec(
+          "UPDATE game_state SET void_proposal_seat = NULL, void_proposal_timeout = NULL WHERE id = 1"
+        );
+        this.broadcastState();
+        // Fall through to ensure idle alarm is still set
+      }
+    }
+
     const players = this.getAllPlayers();
     const activePlayers = players.filter(p => p.connected);
-    const gameState = this.getGameState();
+    const gs = this.getGameState();
 
     const configRow = this.ctx.storage.sql.exec<RoomConfigRow>("SELECT code, type, last_activity FROM room_config LIMIT 1").toArray()[0];
     const lastActivity = configRow?.last_activity ?? 0;
@@ -1017,8 +1029,8 @@ export class GameRoomDOv2 extends DurableObject<Env> {
       this.ctx.storage.sql.exec("DELETE FROM players");
       this.ctx.storage.sql.exec("DELETE FROM room_config");
       this.ctx.storage.sql.exec("DELETE FROM game_state");
-    } else if (activePlayers.length === 1 && gameState?.phase !== "finished") {
-      if (gameState?.phase === "playing") {
+    } else if (activePlayers.length === 1 && gs?.phase !== "finished") {
+      if (gs?.phase === "playing") {
         const winner = activePlayers[0];
         await this.finishGame(winner.seatIndex, players, 0, 0);
       } else {
