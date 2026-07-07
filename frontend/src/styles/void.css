@@ -1,0 +1,54 @@
+/* Void Game Proposal */
+.void-proposal-area {
+  display: flex;
+  justify-content: center;
+  padding: 12px;
+  margin-top: 8px;
+}
+
+.void-propose-btn {
+  background: #8b5cf6;
+  color: white;
+  border: none;
+  padding: 8px 20px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 14px;
+  transition: background 0.2s;
+}
+
+.void-propose-btn:hover {
+  background: #7c3aed;
+}
+
+.void-waiting {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 16px;
+  margin-top: 8px;
+  background: rgba(139, 92, 246, 0.1);
+  border: 1px solid rgba(139, 92, 246, 0.3);
+  border-radius: 12px;
+}
+
+.void-waiting p {
+  margin: 0;
+  font-size: 15px;
+  color: #c4b5fd;
+}
+
+.void-waiting button {
+  background: #ef4444;
+  color: white;
+  border: none;
+  padding: 6px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.void-waiting button:hover {
+  background: #dc2626;
+}
