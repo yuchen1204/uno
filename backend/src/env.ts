@@ -39,6 +39,9 @@ export interface GameStateRow extends Record<string, SqlStorageValue> {
   winner_seat: number | null;
   countdown_end: number | null;
   min_value: number;
+  void_proposal_seat: number | null;
+  void_proposal_timeout: number | null;
+  voided: number;
 }
 
 export interface RoomConfigRow extends Record<string, SqlStorageValue> {

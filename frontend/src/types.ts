@@ -54,6 +54,9 @@ export interface GameState {
   maxPlayers?: number;
   players: PlayerInfo[];
   playHistory?: PlayHistory[];
+  voidProposalSeat?: number;
+  voidProposalTimeout?: number;
+  voided?: boolean;
 }
 
 export interface PlayHistory {
