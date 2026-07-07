@@ -70,6 +70,9 @@ export class GameRoomDOv2 extends DurableObject<Env> {
       ctx.storage.sql.exec(`
         INSERT OR IGNORE INTO game_state (id) VALUES (1)
       `);
+      try { ctx.storage.sql.exec("ALTER TABLE game_state ADD COLUMN void_proposal_seat INTEGER"); } catch (_) {}
+      try { ctx.storage.sql.exec("ALTER TABLE game_state ADD COLUMN void_proposal_timeout INTEGER"); } catch (_) {}
+      try { ctx.storage.sql.exec("ALTER TABLE game_state ADD COLUMN voided INTEGER DEFAULT 0"); } catch (_) {}
     });
   }
 
@@ -80,11 +83,13 @@ export class GameRoomDOv2 extends DurableObject<Env> {
     const existingMe = existingPlayers.find((p) => userId ? p.user_id === userId : p.username === username);
     if (existingMe) {
       this.ctx.storage.sql.exec("UPDATE players SET connected = 1 WHERE seat_index = ?", existingMe.seat_index);
-      await this.ctx.storage.deleteAlarm();
+      if (!this.hasPendingStartAlarm()) {
+        await this.ctx.storage.deleteAlarm();
+      }
       this.broadcastState();
       const tokenRow = this.ctx.storage.sql.exec<{ seat_token: string }>(
         "SELECT seat_token FROM players WHERE seat_index = ?", existingMe.seat_index
-      ).one();
+      ).toArray()[0];
       return { seatIndex: existingMe.seat_index, playerCount: existingPlayers.length, seatToken: tokenRow?.seat_token };
     }
 
@@ -98,6 +103,16 @@ export class GameRoomDOv2 extends DurableObject<Env> {
 
     const configs = this.ctx.storage.sql.exec<RoomConfigRow>("SELECT * FROM room_config LIMIT 1").toArray();
     let config = configs.length > 0 ? configs[0] : null;
+    if (config && (config.code !== code || config.status === "finished")) {
+      // Stale data from a previous game — reset everything
+      this.ctx.storage.sql.exec("DELETE FROM players");
+      this.ctx.storage.sql.exec("DELETE FROM room_config");
+      this.ctx.storage.sql.exec("DELETE FROM game_state");
+      this.ctx.storage.sql.exec("DELETE FROM play_history");
+      this.ctx.storage.sql.exec("INSERT OR IGNORE INTO game_state (id) VALUES (1)");
+      config = null;
+      existingPlayers.length = 0; // clear the stale player list
+    }
     if (!config) {
       this.ctx.storage.sql.exec(
         "INSERT INTO room_config (code, type, max_players, status) VALUES (?, ?, ?, 'waiting')",
@@ -208,15 +223,25 @@ export class GameRoomDOv2 extends DurableObject<Env> {
 
     this.ctx.storage.sql.exec("UPDATE game_state SET phase = 'countdown', countdown_end = ?", Date.now() + COUNTDOWN_DURATION_MS);
     this.ctx.storage.sql.exec("UPDATE room_config SET status = 'countdown'");
-    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS _alarm_tag (id INTEGER PRIMARY KEY DEFAULT 1, value INTEGER)");
-    this.ctx.storage.sql.exec("INSERT OR REPLACE INTO _alarm_tag (id, value) VALUES (1, 1)");
+    this.setPendingStartAlarm();
     this.ctx.storage.setAlarm(Date.now() + COUNTDOWN_DURATION_MS).catch(console.error);
     this.broadcastState();
     return { success: true };
   }
 
+  async handleCommitStart(): Promise<{ success: boolean; error?: string }> {
+    const gameState = this.getGameState();
+    if (gameState?.phase !== "countdown") return { success: false, error: "不在倒数阶段" };
+
+    if (gameState.countdown_end && Date.now() < gameState.countdown_end) {
+      return { success: false, error: "倒计时尚未结束" };
+    }
+
+    return await this.actualStartGame();
+  }
+
   async actualStartGame(): Promise<{ success: boolean; error?: string }> {
-    const config = this.ctx.storage.sql.exec<RoomConfigRow>("SELECT * FROM room_config").one();
+    const config = this.ctx.storage.sql.exec<RoomConfigRow>("SELECT * FROM room_config").toArray()[0];
     if (!config) return { success: false, error: "房间未初始化" };
 
     const gameState = this.getGameState();
@@ -290,11 +315,11 @@ export class GameRoomDOv2 extends DurableObject<Env> {
     }
 
     // Quick room seat token verification
-    const config = this.ctx.storage.sql.exec<RoomConfigRow>("SELECT code, type FROM room_config LIMIT 1").one();
+    const config = this.ctx.storage.sql.exec<RoomConfigRow>("SELECT code, type FROM room_config LIMIT 1").toArray()[0];
     if (config?.type === "quick") {
       const tokenRow = this.ctx.storage.sql.exec<{ seat_token: string }>(
         "SELECT seat_token FROM players WHERE seat_index = ?", seatIndex
-      ).one();
+      ).toArray()[0];
       if (!verify.seatToken || !tokenRow || tokenRow.seat_token !== verify.seatToken) {
         return { success: false, error: "座位验证失败" };
       }
@@ -355,8 +380,7 @@ export class GameRoomDOv2 extends DurableObject<Env> {
     if (allReady && connectedPlayers.length >= 2) {
       this.ctx.storage.sql.exec("UPDATE game_state SET phase = 'countdown', countdown_end = ?", Date.now() + COUNTDOWN_DURATION_MS);
       this.ctx.storage.sql.exec("UPDATE room_config SET status = 'countdown'");
-      this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS _alarm_tag (id INTEGER PRIMARY KEY DEFAULT 1, value INTEGER)");
-      this.ctx.storage.sql.exec("INSERT OR REPLACE INTO _alarm_tag (id, value) VALUES (1, 1)");
+      this.setPendingStartAlarm();
       await this.ctx.storage.setAlarm(Date.now() + COUNTDOWN_DURATION_MS);
     }
 
@@ -686,7 +710,7 @@ export class GameRoomDOv2 extends DurableObject<Env> {
     );
     this.ctx.storage.sql.exec("UPDATE room_config SET status = 'finished'");
 
-    const config = this.ctx.storage.sql.exec<{ code: string; type: string }>("SELECT code, type FROM room_config").one();
+    const config = this.ctx.storage.sql.exec<{ code: string; type: string }>("SELECT code, type FROM room_config").toArray()[0];
     if (config && config.type !== "quick" && this.env) {
       const winner = players.find(p => p.seatIndex === winnerSeat);
       if (winner?.userId) {
@@ -722,8 +746,8 @@ export class GameRoomDOv2 extends DurableObject<Env> {
   }
 
   private getGameState(): GameStateRow | null {
-    const row = this.ctx.storage.sql.exec<GameStateRow>("SELECT * FROM game_state WHERE id = 1").one();
-    return row;
+    const row = this.ctx.storage.sql.exec<GameStateRow>("SELECT * FROM game_state WHERE id = 1").toArray()[0];
+    return row || null;
   }
 
   private getAllPlayers(): PlayerFull[] {
@@ -837,10 +861,12 @@ export class GameRoomDOv2 extends DurableObject<Env> {
       const updatedPlayers = this.getAllPlayers();
       const activePlayers = updatedPlayers.filter(p => p.connected);
       const gameState = this.getGameState();
-      if (activePlayers.length === 0) {
-        await this.ctx.storage.setAlarm(Date.now() + DISCONNECT_TIMEOUT_MS);
-      } else if (activePlayers.length === 1 && gameState?.phase !== "finished") {
-        await this.ctx.storage.setAlarm(Date.now() + DISCONNECT_TIMEOUT_MS);
+      if (!this.hasPendingStartAlarm()) {
+        if (activePlayers.length === 0) {
+          await this.setAlarmUnlessEarlier(Date.now() + DISCONNECT_TIMEOUT_MS);
+        } else if (activePlayers.length === 1 && gameState?.phase !== "finished") {
+          await this.setAlarmUnlessEarlier(Date.now() + DISCONNECT_TIMEOUT_MS);
+        }
       }
       await this.broadcastState();
     }
@@ -848,9 +874,8 @@ export class GameRoomDOv2 extends DurableObject<Env> {
 
   async alarm() {
     // Check if this is a start game alarm
-    const alarmTag = this.ctx.storage.sql.exec<{ value: number }>("SELECT value FROM _alarm_tag WHERE id = 1").one();
-    if (alarmTag?.value === 1) {
-      this.ctx.storage.sql.exec("DELETE FROM _alarm_tag");
+    if (this.hasPendingStartAlarm()) {
+      this.clearPendingStartAlarm();
       await this.actualStartGame();
       return;
     }
@@ -859,7 +884,7 @@ export class GameRoomDOv2 extends DurableObject<Env> {
     const activePlayers = players.filter(p => p.connected);
     const gameState = this.getGameState();
 
-    const configRow = this.ctx.storage.sql.exec<RoomConfigRow>("SELECT code, type, last_activity FROM room_config LIMIT 1").one();
+    const configRow = this.ctx.storage.sql.exec<RoomConfigRow>("SELECT code, type, last_activity FROM room_config LIMIT 1").toArray()[0];
     const lastActivity = configRow?.last_activity ?? 0;
     const elapsed = Date.now() - lastActivity;
     const IDLE_TIMEOUT = IDLE_TIMEOUT_MS;
@@ -936,7 +961,7 @@ export class GameRoomDOv2 extends DurableObject<Env> {
     const topCard = gameState ? JSON.parse(gameState.top_card || "{}") : {};
     const deck = gameState ? JSON.parse(gameState.deck) : [];
 
-    const configRow = this.ctx.storage.sql.exec<{ type: string, max_players: number }>("SELECT type, max_players FROM room_config LIMIT 1").one();
+    const configRow = this.ctx.storage.sql.exec<{ type: string, max_players: number }>("SELECT type, max_players FROM room_config LIMIT 1").toArray()[0];
 
     const historyRows = this.ctx.storage.sql.exec<PlayHistoryRow>(
       "SELECT seat_index, username, card, timestamp, combo_card FROM play_history ORDER BY id DESC LIMIT " + PLAY_HISTORY_LIMIT
@@ -962,6 +987,9 @@ export class GameRoomDOv2 extends DurableObject<Env> {
       minValue: gameState?.min_value !== undefined ? gameState.min_value : -1,
       roomType: (configRow?.type as "public" | "private" | "quick" | undefined) || undefined,
       maxPlayers: configRow?.max_players,
+      voidProposalSeat: gameState?.void_proposal_seat ?? undefined as unknown as number | undefined,
+      voidProposalTimeout: gameState?.void_proposal_timeout ?? undefined as unknown as number | undefined,
+      voided: (gameState?.voided ?? 0) === 1 || undefined,
       players: players.map(p => ({
         seatIndex: p.seatIndex,
         username: p.username,
@@ -986,13 +1014,41 @@ export class GameRoomDOv2 extends DurableObject<Env> {
     this.ctx.storage.sql.exec("UPDATE room_config SET last_activity = ?", Date.now());
   }
 
+  private ensureAlarmTagTable(): void {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS _alarm_tag (id INTEGER PRIMARY KEY DEFAULT 1, value INTEGER)");
+  }
+
+  private setPendingStartAlarm(): void {
+    this.ensureAlarmTagTable();
+    this.ctx.storage.sql.exec("INSERT OR REPLACE INTO _alarm_tag (id, value) VALUES (1, 1)");
+  }
+
+  private hasPendingStartAlarm(): boolean {
+    this.ensureAlarmTagTable();
+    const alarmTag = this.ctx.storage.sql.exec<{ value: number }>("SELECT value FROM _alarm_tag WHERE id = 1").toArray()[0];
+    return alarmTag?.value === 1;
+  }
+
+  private clearPendingStartAlarm(): void {
+    this.ensureAlarmTagTable();
+    this.ctx.storage.sql.exec("DELETE FROM _alarm_tag");
+  }
+
+  private async setAlarmUnlessEarlier(scheduledTime: number): Promise<void> {
+    const currentAlarm = await this.ctx.storage.getAlarm();
+    if (currentAlarm !== null && currentAlarm <= scheduledTime) return;
+    await this.ctx.storage.setAlarm(scheduledTime);
+  }
+
   private async ensureIdleAlarm(force: boolean = false): Promise<void> {
-    const existing = this.ctx.storage.sql.exec<{ last_activity: number }>("SELECT last_activity FROM room_config LIMIT 1").one();
+    if (this.hasPendingStartAlarm()) return;
+
+    const existing = this.ctx.storage.sql.exec<{ last_activity: number }>("SELECT last_activity FROM room_config LIMIT 1").toArray()[0];
     const lastActivity = existing?.last_activity ?? 0;
     const elapsed = Date.now() - lastActivity;
     const checkInterval = IDLE_CHECK_INTERVAL_MS;
     if (force || lastActivity === 0 || elapsed < checkInterval) {
-      await this.ctx.storage.setAlarm(Date.now() + checkInterval);
+      await this.setAlarmUnlessEarlier(Date.now() + checkInterval);
     }
   }
 
