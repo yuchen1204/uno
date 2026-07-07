@@ -42,8 +42,13 @@ async function handleGame(request: Request, env: Env, pathname: string): Promise
     return Response.json(result);
   }
 
+  if (action === "commit-start") {
+    const result = await stub.handleCommitStart();
+    return Response.json(result);
+  }
+
   if (action === "action") {
-    const body = await request.json<{ seatIndex: number; action: string; cardIndex?: number; color?: CardColor; comboCardIndex?: number }>();
+    const body = await request.json<{ seatIndex: number; action: string; cardIndex?: number; color?: CardColor; comboCardIndex?: number; agreed?: boolean }>();
     let verifyUsername: string | undefined;
     let verifyUserId: string | undefined;
     let verifySeatToken: string | undefined;
@@ -66,7 +71,7 @@ async function handleGame(request: Request, env: Env, pathname: string): Promise
       if (nick) verifyUsername = nick;
     }
     verifySeatToken = request.headers.get("X-Uno-Seat-Token") || undefined;
-    const result = await stub.playerAction(body.seatIndex, body.action, { cardIndex: body.cardIndex, color: body.color, comboCardIndex: body.comboCardIndex }, { username: verifyUsername, userId: verifyUserId, seatToken: verifySeatToken });
+    const result = await stub.playerAction(body.seatIndex, body.action, { cardIndex: body.cardIndex, color: body.color, comboCardIndex: body.comboCardIndex, agreed: body.agreed } as any, { username: verifyUsername, userId: verifyUserId, seatToken: verifySeatToken });
     return Response.json(result);
   }
 
