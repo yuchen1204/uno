@@ -332,9 +332,25 @@ export class GameRoomDOv2 extends DurableObject<Env> {
       return this.continueGame(seatIndex);
     }
 
+    // Void game actions — allowed regardless of current_seat
+    if (action === "void_game") {
+      return this.handleVoidProposal(seatIndex);
+    }
+    if (action === "void_response") {
+      const agreed = (payload as any)?.agreed ?? false;
+      return this.handleVoidResponse(seatIndex, agreed);
+    }
+    if (action === "cancel_void") {
+      return this.handleCancelVoid(seatIndex);
+    }
+
     const gameState = this.getGameState();
     if (!gameState || gameState.phase !== "playing") {
       return { success: false, error: "游戏未进行中" };
+    }
+    // Gate normal actions when a void proposal is pending
+    if (gameState.void_proposal_seat != null) {
+      return { success: false, error: "有未处理的无效局提议，无法操作" };
     }
     if (gameState.current_seat !== seatIndex) {
       return { success: false, error: "不是你的回合" };
@@ -724,6 +740,75 @@ export class GameRoomDOv2 extends DurableObject<Env> {
 
     await this.updateD1RoomStatus(config?.code || "", "finished");
     this.broadcastState();
+  }
+
+  private async finishVoidGame(): Promise<void> {
+    this.ctx.storage.sql.exec(
+      "UPDATE game_state SET phase = 'finished', voided = 1, void_proposal_seat = NULL, void_proposal_timeout = NULL WHERE id = 1"
+    );
+    this.ctx.storage.sql.exec("UPDATE room_config SET status = 'finished'");
+
+    const config = this.ctx.storage.sql.exec<{ code: string }>("SELECT code FROM room_config").toArray()[0];
+    await this.updateD1RoomStatus(config?.code || "", "finished");
+    this.broadcastState();
+  }
+
+  private handleVoidProposal(seatIndex: number): { success: boolean; error?: string } {
+    const gameState = this.getGameState();
+    if (!gameState || gameState.phase !== "playing") {
+      return { success: false, error: "游戏未进行中" };
+    }
+    if (gameState.void_proposal_seat != null) {
+      return { success: false, error: "已有未处理的无效局提议" };
+    }
+
+    const timeout = Date.now() + 30000; // 30 seconds
+    this.ctx.storage.sql.exec(
+      "UPDATE game_state SET void_proposal_seat = ?, void_proposal_timeout = ? WHERE id = 1",
+      seatIndex,
+      timeout
+    );
+
+    this.setAlarmUnlessEarlier(timeout + 100);
+    this.broadcastState();
+    return { success: true };
+  }
+
+  private async handleVoidResponse(seatIndex: number, agreed: boolean): Promise<{ success: boolean; error?: string }> {
+    const gameState = this.getGameState();
+    if (!gameState || gameState.phase !== "playing") {
+      return { success: false, error: "游戏未进行中" };
+    }
+    if (gameState.void_proposal_seat == null) {
+      return { success: false, error: "没有未处理的无效局提议" };
+    }
+    if (seatIndex === gameState.void_proposal_seat) {
+      return { success: false, error: "不能回应自己的提议" };
+    }
+
+    if (agreed) {
+      await this.finishVoidGame();
+      return { success: true };
+    } else {
+      this.ctx.storage.sql.exec(
+        "UPDATE game_state SET void_proposal_seat = NULL, void_proposal_timeout = NULL WHERE id = 1"
+      );
+      this.broadcastState();
+      return { success: true };
+    }
+  }
+
+  private handleCancelVoid(seatIndex: number): { success: boolean; error?: string } {
+    const gameState = this.getGameState();
+    if (gameState?.void_proposal_seat !== seatIndex) {
+      return { success: false, error: "不是你发起的提议" };
+    }
+
+    this.ctx.storage.sql.exec(
+      "UPDATE game_state SET void_proposal_seat = NULL, void_proposal_timeout = NULL WHERE id = 1"
+    );
+    this.broadcastState();
+    return { success: true };
   }
 
   private addScoreToTarget(seatIndex: number, amount: number, players: PlayerFull[]): void {
