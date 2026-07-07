@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useReducer } from "react";
+import { createPortal } from "react-dom";
 import { useAuth } from "../AuthContext";
 import { api } from "../api";
 import { GameState, Card as CardType, CardColor } from "../types";
@@ -23,6 +24,7 @@ interface UiState {
   showNicknameModal: boolean;
   tempNickname: string;
   nicknameJoining: boolean;
+  showVoidResponse: boolean;
 }
 
 type UiAction =
@@ -35,7 +37,8 @@ type UiAction =
   | { type: "CLEAR_ERROR" }
   | { type: "SHOW_LEAVE_CONFIRM"; show: boolean }
   | { type: "SHOW_NICKNAME_MODAL"; show: boolean }
-  | { type: "SET_TEMP_NICKNAME"; nickname: string };
+  | { type: "SET_TEMP_NICKNAME"; nickname: string }
+  | { type: "SHOW_VOID_RESPONSE"; show: boolean };
 
 const initialUi: UiState = {
   pendingCardIndex: -1,
@@ -46,6 +49,7 @@ const initialUi: UiState = {
   showNicknameModal: false,
   tempNickname: "",
   nicknameJoining: false,
+  showVoidResponse: false,
 };
 
 function uiReducer(state: UiState, action: UiAction): UiState {
@@ -60,6 +64,7 @@ function uiReducer(state: UiState, action: UiAction): UiState {
     case "SHOW_LEAVE_CONFIRM": return { ...state, showLeaveConfirm: action.show };
     case "SHOW_NICKNAME_MODAL": return { ...state, showNicknameModal: action.show };
     case "SET_TEMP_NICKNAME": return { ...state, tempNickname: action.nickname };
+    case "SHOW_VOID_RESPONSE": return { ...state, showVoidResponse: action.show };
   }
 }
 
@@ -212,6 +217,7 @@ export default function GameScreen({ code, onLeave }: Props) {
           dispatch({ type: "SET_COUNTDOWN", text: Math.ceil(diff / 1000).toString() });
         } else {
           dispatch({ type: "SET_COUNTDOWN", text: "开始！" });
+          api.commitStart(code).catch(() => {});
         }
       }, 100);
       return () => clearInterval(interval);
@@ -220,6 +226,14 @@ export default function GameScreen({ code, onLeave }: Props) {
     }
   }, [gameState]);
 
+  useEffect(() => {
+    if (gameState?.voidProposalSeat != null && gameState.voidProposalSeat !== localSeat) {
+      dispatch({ type: "SHOW_VOID_RESPONSE", show: true });
+    } else if (gameState?.voidProposalSeat == null) {
+      dispatch({ type: "SHOW_VOID_RESPONSE", show: false });
+    }
+  }, [gameState?.voidProposalSeat, localSeat]);
+
   const doAction = async (action: string, cardIndex?: number, color?: CardColor, comboCardIndex?: number) => {
     try {
       const result = await api.playerAction(code, localSeat, action, cardIndex, color, comboCardIndex);
@@ -227,6 +241,17 @@ export default function GameScreen({ code, onLeave }: Props) {
         setError(result.error || "操作失败");
       }
       await fetchHand();
+    } catch (err: any) {
+      setError(err.message);
+    }
+  };
+
+  const doVoidAction = async (action: string, agreed?: boolean) => {
+    try {
+      const result = await api.playerAction(code, localSeat, action, undefined, undefined, undefined, agreed);
+      if (!result.success) {
+        setError(result.error || "操作失败");
+      }
     } catch (err: any) {
       setError(err.message);
     }
@@ -398,7 +423,7 @@ export default function GameScreen({ code, onLeave }: Props) {
           </div>
         </div>
 
-        {gameState.phase === "playing" && (
+        {gameState.phase === "playing" && gameState.voidProposalSeat == null && (
           <PlayerHand
             cards={hand}
             onPlayCard={handlePlayCard}
@@ -413,6 +438,21 @@ export default function GameScreen({ code, onLeave }: Props) {
           />
         )}
 
+        {gameState.phase === "playing" && gameState.voidProposalSeat == null && (
+          <div className="void-proposal-area">
+            <button className="void-propose-btn" onClick={() => doVoidAction("void_game")}>
+              提议无效局
+            </button>
+          </div>
+        )}
+
+        {gameState.phase === "playing" && gameState.voidProposalSeat === localSeat && (
+          <div className="void-waiting">
+            <p>⏳ 已提议无效局，等待对方回应...</p>
+            <button onClick={() => doVoidAction("cancel_void")}>取消提议</button>
+          </div>
+        )}
+
         {gameState.phase === "waiting" && (
           <div className="waiting-actions">
             <button className={localPlayer?.isReady ? "" : "primary"} onClick={handleReady}>
@@ -424,17 +464,20 @@ export default function GameScreen({ code, onLeave }: Props) {
           </div>
         )}
 
-        {gameState.phase === "countdown" && (
+        {gameState.phase === "countdown" && createPortal(
           <div className="countdown-overlay">
             {ui.countdownText}
-          </div>
+          </div>,
+          document.body
         )}
 
         {gameState.phase === "finished" && (
           <div className="finished-box">
             <h2>
-              游戏结束！
-              {gameState.winnerSeat === localSeat ? "你赢了！" : `座位 ${(gameState.winnerSeat ?? 0) + 1} 获胜`}
+              {gameState.voided
+                ? "本局为无效局（Void Game），双方不计分"
+                : `游戏结束！${gameState.winnerSeat === localSeat ? "你赢了！" : `座位 ${(gameState.winnerSeat ?? 0) + 1} 获胜`}`
+              }
             </h2>
             <div className="finished-actions">
               <button className="primary" onClick={handleContinue}>继续游戏</button>
@@ -449,6 +492,22 @@ export default function GameScreen({ code, onLeave }: Props) {
           message="确定要退出房间吗？"
           onConfirm={handleLeaveRoom}
           onCancel={() => dispatch({ type: "SHOW_LEAVE_CONFIRM", show: false })}
+        />
+      )}
+
+      {ui.showVoidResponse && (
+        <ConfirmModal
+          message="对方提议此局作废（Void Game），是否同意？"
+          confirmText="同意"
+          cancelText="拒绝"
+          onConfirm={() => {
+            dispatch({ type: "SHOW_VOID_RESPONSE", show: false });
+            doVoidAction("void_response", true);
+          }}
+          onCancel={() => {
+            dispatch({ type: "SHOW_VOID_RESPONSE", show: false });
+            doVoidAction("void_response", false);
+          }}
         />
       )}
     </div>
