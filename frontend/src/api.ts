@@ -109,10 +109,24 @@ export const api = {
     });
   },
 
-  playerAction(code: string, seatIndex: number, action: string, cardIndex?: number, color?: CardColor, comboCardIndex?: number): Promise<any> {
+  commitStart(code: string): Promise<{ success: boolean; error?: string }> {
+    return request(`/game/${code}/commit-start`, {
+      method: "POST",
+      body: "{}",
+    });
+  },
+
+  playerAction(code: string, seatIndex: number, action: string, cardIndex?: number, color?: CardColor, comboCardIndex?: number, voidAgreed?: boolean): Promise<any> {
     return request(`/game/${code}/action`, {
       method: "POST",
-      body: JSON.stringify({ seatIndex, action, cardIndex, color, comboCardIndex }),
+      body: JSON.stringify({
+        seatIndex,
+        action,
+        cardIndex,
+        color,
+        comboCardIndex,
+        ...(voidAgreed !== undefined ? { agreed: voidAgreed } : {}),
+      }),
     });
   },
 
