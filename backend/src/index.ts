@@ -37,7 +37,7 @@ async function handleGame(request: Request, env: Env, pathname: string): Promise
   }
 
   if (action === "start") {
-    const body = await request.json<{ seatIndex: number }>();
+    await request.json<{ seatIndex: number }>();
     const result = await stub.handleStartGame();
     return Response.json(result);
   }

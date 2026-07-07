@@ -1,4 +1,3 @@
-import { v4 as uuidv4 } from "uuid";
 import type { Env } from "./env";
 import { authenticateRequest } from "./auth";
 import { ROOM_CODE_LENGTH, MAX_PLAYERS, MIN_PLAYERS } from "../../shared/constants";
@@ -15,7 +14,7 @@ function generateRoomCode(): string {
 
 export async function handleCreateRoom(request: Request, env: Env): Promise<Response> {
   try {
-    const { type, nickname, maxPlayers = 4 } = await request.json<{ type: "public" | "private" | "quick"; nickname?: string; maxPlayers?: number }>();
+    const { type, maxPlayers = 4 } = await request.json<{ type: "public" | "private" | "quick"; maxPlayers?: number }>();
     if (!["public", "private", "quick"].includes(type)) {
       return Response.json({ error: "无效的房间类型" }, { status: 400 });
     }
@@ -47,7 +46,7 @@ export async function handleCreateRoom(request: Request, env: Env): Promise<Resp
     }
 
     return Response.json({ code, type, hostName: username });
-  } catch (e) {
+  } catch {
     return Response.json({ error: "创建房间失败" }, { status: 500 });
   }
 }
@@ -58,7 +57,7 @@ export async function handleListRooms(request: Request, env: Env): Promise<Respo
     const lobbyStub = env.LOBBY_DO.get(lobbyId) as unknown as DurableObjectStub<LobbyDOv2>;
     const rooms = await lobbyStub.listRooms();
     return Response.json({ rooms });
-  } catch (e) {
+  } catch {
     return Response.json({ error: "获取房间列表失败" }, { status: 500 });
   }
 }

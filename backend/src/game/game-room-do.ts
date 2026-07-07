@@ -351,10 +351,7 @@ export class GameRoomDOv2 extends DurableObject<Env> {
     const updatedPlayers = this.getAllPlayers();
     const connectedPlayers = updatedPlayers.filter(p => p.connected);
     const allReady = connectedPlayers.every(p => p.isReady);
-    const config = this.ctx.storage.sql.exec<{ max_players: number }>("SELECT max_players FROM room_config LIMIT 1").one();
-    const maxPlayers = config?.max_players ?? 4;
-    const isFull = connectedPlayers.length >= maxPlayers;
-    
+
     if (allReady && connectedPlayers.length >= 2) {
       this.ctx.storage.sql.exec("UPDATE game_state SET phase = 'countdown', countdown_end = ?", Date.now() + COUNTDOWN_DURATION_MS);
       this.ctx.storage.sql.exec("UPDATE room_config SET status = 'countdown'");
@@ -933,7 +930,7 @@ export class GameRoomDOv2 extends DurableObject<Env> {
     }
   }
 
-  async getFullStateForPlayer(seatIndex: number): Promise<GameState> {
+  async getFullStateForPlayer(_seatIndex: number): Promise<GameState> {
     const gameState = this.getGameState();
     const players = this.getAllPlayers();
     const topCard = gameState ? JSON.parse(gameState.top_card || "{}") : {};
@@ -1013,7 +1010,7 @@ export class GameRoomDOv2 extends DurableObject<Env> {
         const writer = this.pendingStreams[i].getWriter();
         writer.write(message);
         writer.releaseLock();
-      } catch (e) {
+      } catch {
         closedIndexes.push(i);
       }
     }
