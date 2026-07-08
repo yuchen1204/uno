@@ -44,6 +44,9 @@ body {
   max-width: 1180px;
   margin: 0 auto;
   padding: 16px;
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
 }
 
 .app-header {
@@ -361,6 +364,7 @@ body {
   flex-direction: column;
   align-items: center;
   gap: 24px;
+  flex: 1;
 }
 
 .game-screen-centered {
@@ -482,7 +486,7 @@ body {
 }
 
 .countdown-overlay {
-  position: absolute;
+  position: fixed;
   top: 0;
   left: 0;
   right: 0;
@@ -525,9 +529,50 @@ body {
 .game-table {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 28px;
   width: 100%;
+  flex: 1;
+  gap: 16px;
+}
+
+.table-top, .table-center, .table-bottom {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+}
+
+.table-center {
+  flex: 1;
+  justify-content: center;
+  gap: 24px;
+  min-height: 200px;
+}
+
+.table-bottom {
+  gap: 12px;
+}
+
+.local-player-info {
+  background: var(--uno-yellow);
+  padding: 8px 16px;
+  border-radius: var(--radius-full);
+  font-weight: bold;
+  font-family: "Fredoka", sans-serif;
+  box-shadow: var(--shadow-sm);
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  font-size: 15px;
+}
+
+.local-player-info .name {
+  color: var(--uno-black);
+}
+
+.local-player-info .cards {
+  font-family: "Space Mono", monospace;
+  color: #555;
+  font-size: 13px;
 }
 
 .players-top {
@@ -647,16 +692,18 @@ body {
 
 .player-hand {
   display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-  justify-content: center;
-  padding: 18px;
+  gap: 0;
+  flex-wrap: nowrap;
+  justify-content: flex-start;
+  padding: 18px 24px;
   background: var(--uno-white);
   border: 2px solid #eee;
   border-radius: var(--radius-lg);
-  min-height: 150px;
+  min-height: 170px;
   width: 100%;
   box-shadow: var(--shadow-sm);
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 /* ---------- Cards ---------- */
@@ -692,6 +739,10 @@ body {
     transform: translateY(0);
     opacity: 1;
   }
+}
+
+.player-hand .card:not(:first-child) {
+  margin-left: -30px;
 }
 
 .card:hover {
@@ -861,72 +912,69 @@ body {
   flex-direction: column;
 }
 
+.history-modal h2 {
+  font-family: "Bungee", sans-serif;
+  color: var(--uno-red);
+  margin-bottom: 16px;
+  text-align: center;
+}
+
 .history-modal .history-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 12px;
   overflow-y: auto;
   overflow-x: hidden;
   flex: 1;
   min-height: 0;
+  padding: 4px;
 }
 
 .history-entry {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 8px 12px;
+  justify-content: space-between;
+  padding: 12px 16px;
   background: var(--uno-gray);
   border-radius: 12px;
   flex-shrink: 0;
 }
 
-.history-entry .username {
-  font-size: 13px;
+.history-user-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 120px;
+}
+
+.history-user-info .username {
+  font-size: 14px;
   font-weight: 600;
   color: var(--uno-red);
-  min-width: 60px;
-  text-align: center;
-  flex-shrink: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.history-entry .card-box {
-  width: 45px;
-  height: 68px;
-  position: relative;
-  flex-shrink: 0;
-}
-
-.history-entry .combo-plus {
+.history-user-info .action {
   font-size: 12px;
-  color: #999;
-  flex-shrink: 0;
+  color: #666;
+}
+
+.history-cards {
+  display: flex;
+  gap: 8px;
+  align-items: center;
 }
 
 /* Responsive: shrink cards in history on small screens */
-@media (max-width: 600px) {
+@media (max-width: 480px) {
   .history-entry {
-    gap: 8px;
-    padding: 6px 10px;
+    padding: 10px 12px;
   }
-  .history-entry .card-box {
-    width: 36px;
-    height: 54px;
-  }
-  .history-entry .username {
-    font-size: 12px;
-    min-width: 44px;
-  }
-}
-
-@media (max-width: 380px) {
-  .history-entry .card-box {
-    width: 30px;
-    height: 46px;
-  }
-  .history-entry .username {
-    font-size: 11px;
-    min-width: 36px;
+  .history-user-info .username {
+    font-size: 13px;
+    max-width: 90px;
   }
 }
 
@@ -1078,9 +1126,13 @@ body {
   .color-btn { width: 48px; height: 48px; }
 
   .player-hand {
-    gap: 6px;
-    padding: 12px;
-    min-height: 110px;
+    gap: 0;
+    padding: 12px 16px;
+    min-height: 130px;
+  }
+
+  .player-hand .card:not(:first-child) {
+    margin-left: -20px;
   }
 
   .modal {

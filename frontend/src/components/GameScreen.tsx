@@ -196,7 +196,12 @@ export default function GameScreen({ code, onLeave }: Props) {
           fetchHand();
         }
       };
-      readLoop().catch((e: unknown) => { console.error("Stream read error:", e); });
+      readLoop().catch((e: unknown) => {
+    // AbortError is expected when the component unmounts (streamRef.current?.abort()).
+    // Don't log it as an error — the stream cleanup is intentional.
+    if (e instanceof DOMException && e.name === "AbortError") return;
+    console.error("Stream read error:", e);
+  });
     } catch (err: any) {
       setError(err.message || "加入游戏失败");
     }
@@ -303,6 +308,10 @@ export default function GameScreen({ code, onLeave }: Props) {
 
   const handleLeaveRoom = async () => {
     dispatch({ type: "SHOW_LEAVE_CONFIRM", show: false });
+    // Abort the stream first so readLoop stops before we call leaveRoom.
+    // This prevents a race where readLoop calls fetchHand() after the player
+    // has been deleted on the backend, causing a 500 error.
+    streamRef.current?.abort();
     try {
       await api.leaveRoom(code, user?.username);
       onLeave();
@@ -407,84 +416,99 @@ export default function GameScreen({ code, onLeave }: Props) {
       )}
 
       <div className="game-table">
-        <div className={`game-hint ${isMyTurn ? "my-turn" : ""}`}>
-          {getGameHint()}
+        <div className="table-top">
+          <PlayerList players={gameState.players} currentSeat={gameState.currentSeat} localSeat={localSeat} />
         </div>
 
-        <PlayerList players={gameState.players} currentSeat={gameState.currentSeat} localSeat={localSeat} />
-
-        <div className="center-area">
-          <DiscardPile card={gameState.topCard} playHistory={gameState.playHistory} />
-          <div
-            className={`deck ${!canDraw ? "disabled" : ""}`}
-            onClick={canDraw ? handleDraw : undefined}
-          >
-            {gameState.phase === "playing" ? `${gameState.deckCount}张` : ""}
+        <div className="table-center">
+          <div className={`game-hint ${isMyTurn ? "my-turn" : ""}`}>
+            {getGameHint()}
           </div>
-        </div>
-
-        {gameState.phase === "playing" && gameState.voidProposalSeat == null && (
-          <PlayerHand
-            cards={hand}
-            onPlayCard={handlePlayCard}
-            onSkip={(isMyTurn && !(gameState.drawAccumulated > 0) && localSkipCount < 3) ? handleSkip : undefined}
-            disabled={!isMyTurn}
-            topCard={gameState.topCard}
-            wildColor={gameState.wildColor}
-            drawAccumulated={gameState.drawAccumulated}
-            minValue={gameState.minValue}
-            isSelectingCombo={ui.pendingCardIndex !== -1}
-            pendingCardIndex={ui.pendingCardIndex}
-          />
-        )}
-
-        {gameState.phase === "playing" && gameState.voidProposalSeat == null && (
-          <div className="void-proposal-area">
-            <button className="void-propose-btn" onClick={() => doVoidAction("void_game")}>
-              提议无效局
-            </button>
-          </div>
-        )}
-
-        {gameState.phase === "playing" && gameState.voidProposalSeat === localSeat && (
-          <div className="void-waiting">
-            <p>⏳ 已提议无效局，等待对方回应...</p>
-            <button onClick={() => doVoidAction("cancel_void")}>取消提议</button>
-          </div>
-        )}
-
-        {gameState.phase === "waiting" && (
-          <div className="waiting-actions">
-            <button className={localPlayer?.isReady ? "" : "primary"} onClick={handleReady}>
-              {localPlayer?.isReady ? "取消准备" : "准备"}
-            </button>
-            {localPlayer?.isHost && gameState.maxPlayers !== 2 && (
-              <button onClick={handleStartGame}>开始游戏</button>
-            )}
-          </div>
-        )}
-
-        {gameState.phase === "countdown" && createPortal(
-          <div className="countdown-overlay">
-            {ui.countdownText}
-          </div>,
-          document.body
-        )}
-
-        {gameState.phase === "finished" && (
-          <div className="finished-box">
-            <h2>
-              {gameState.voided
-                ? "本局为无效局（Void Game），双方不计分"
-                : `游戏结束！${gameState.winnerSeat === localSeat ? "你赢了！" : `座位 ${(gameState.winnerSeat ?? 0) + 1} 获胜`}`
-              }
-            </h2>
-            <div className="finished-actions">
-              <button className="primary" onClick={handleContinue}>继续游戏</button>
-              <button onClick={() => dispatch({ type: "SHOW_LEAVE_CONFIRM", show: true })}>离开房间</button>
+          <div className="center-area">
+            <DiscardPile card={gameState.topCard} playHistory={gameState.playHistory} />
+            <div
+              className={`deck ${!canDraw ? "disabled" : ""}`}
+              onClick={canDraw ? handleDraw : undefined}
+            >
+              {gameState.phase === "playing" ? `${gameState.deckCount}张` : ""}
             </div>
           </div>
-        )}
+        </div>
+
+        <div className="table-bottom">
+          {localPlayer && (
+            <div className="local-player-info">
+              <div className="name">
+                {localPlayer.username} (你) {localPlayer.isHost ? "👑" : ""}
+                {localPlayer.isReady && <span style={{color: '#4caf50', fontSize: 12}}> (已准备)</span>}
+              </div>
+              <div className="cards">{localPlayer.handCount} 张牌</div>
+            </div>
+          )}
+
+          {gameState.phase === "playing" && gameState.voidProposalSeat == null && (
+            <PlayerHand
+              cards={hand}
+              onPlayCard={handlePlayCard}
+              onSkip={(isMyTurn && !(gameState.drawAccumulated > 0) && localSkipCount < 3) ? handleSkip : undefined}
+              disabled={!isMyTurn}
+              topCard={gameState.topCard}
+              wildColor={gameState.wildColor}
+              drawAccumulated={gameState.drawAccumulated}
+              minValue={gameState.minValue}
+              isSelectingCombo={ui.pendingCardIndex !== -1}
+              pendingCardIndex={ui.pendingCardIndex}
+            />
+          )}
+
+          {gameState.phase === "playing" && gameState.voidProposalSeat == null && (
+            <div className="void-proposal-area">
+              <button className="void-propose-btn" onClick={() => doVoidAction("void_game")}>
+                提议无效局
+              </button>
+            </div>
+          )}
+
+          {gameState.phase === "playing" && gameState.voidProposalSeat === localSeat && (
+            <div className="void-waiting">
+              <p>⏳ 已提议无效局，等待对方回应...</p>
+              <button onClick={() => doVoidAction("cancel_void")}>取消提议</button>
+            </div>
+          )}
+
+          {gameState.phase === "waiting" && (
+            <div className="waiting-actions">
+              <button className={localPlayer?.isReady ? "" : "primary"} onClick={handleReady}>
+                {localPlayer?.isReady ? "取消准备" : "准备"}
+              </button>
+              {localPlayer?.isHost && gameState.maxPlayers !== 2 && (
+                <button onClick={handleStartGame}>开始游戏</button>
+              )}
+            </div>
+          )}
+
+          {gameState.phase === "countdown" && createPortal(
+            <div className="countdown-overlay">
+              {ui.countdownText}
+            </div>,
+            document.body
+          )}
+
+          {gameState.phase === "finished" && (
+            <div className="finished-box">
+              <h2>
+                {gameState.voided
+                  ? "本局为无效局（Void Game），双方不计分"
+                  : `游戏结束！${gameState.winnerSeat === localSeat ? "你赢了！" : `座位 ${(gameState.winnerSeat ?? 0) + 1} 获胜`}`
+                }
+              </h2>
+              <div className="finished-actions">
+                <button className="primary" onClick={handleContinue}>继续游戏</button>
+                <button onClick={() => dispatch({ type: "SHOW_LEAVE_CONFIRM", show: true })}>离开房间</button>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
 
       {ui.showLeaveConfirm && (

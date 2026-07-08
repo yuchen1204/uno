@@ -48,22 +48,18 @@ export default function DiscardPile({ card, playHistory }: Props) {
           <div className="modal history-modal" onClick={e => e.stopPropagation()}>
             <h2>出牌记录</h2>
             <div className="history-list">
-              {playHistory.map((entry, i) => (
+              {[...playHistory].reverse().map((entry, i) => (
                 <div key={i} className="history-entry">
-                  <div className="username">
-                    {entry.username}
+                  <div className="history-user-info">
+                    <span className="username" title={entry.username}>{entry.username}</span>
+                    <span className="action">出了</span>
                   </div>
-                  <div className="card-box">
-                    <CardComponent card={entry.card} />
+                  <div className="history-cards">
+                    <CardComponent card={entry.card} small />
+                    {entry.comboCard && (
+                      <CardComponent card={entry.comboCard} small />
+                    )}
                   </div>
-                  {entry.comboCard && (
-                    <>
-                      <span className="combo-plus">+</span>
-                      <div className="card-box">
-                        <CardComponent card={entry.comboCard} />
-                      </div>
-                    </>
-                  )}
                 </div>
               ))}
             </div>

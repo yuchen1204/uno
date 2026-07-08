@@ -1103,7 +1103,7 @@ export class GameRoomDOv2 extends DurableObject<Env> {
 
   async getPlayerHand(seatIndex: number): Promise<{ hand: Card[] }> {
     const player = this.getAllPlayers().find(p => p.seatIndex === seatIndex);
-    if (!player) throw new Error("玩家不存在");
+    if (!player) return { hand: [] };
     return { hand: player.hand };
   }
 

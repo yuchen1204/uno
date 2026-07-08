@@ -92,59 +92,65 @@ export async function handleRoomDetail(request: Request, env: Env, pathname: str
 }
 
 async function handleJoinRoom(code: string, request: Request, env: Env): Promise<Response> {
-  const room = await env.DB.prepare("SELECT * FROM rooms WHERE code = ?")
-    .bind(code)
-    .first<{ code: string; type: string; status: string; max_players: number }>();
-  if (!room) {
-    const lobbyId = env.LOBBY_DO.idFromName("global_v2");
-    const lobbyStub = env.LOBBY_DO.get(lobbyId) as unknown as DurableObjectStub<LobbyDOv2>;
-    await lobbyStub.removeRoom(code);
-    return Response.json({ error: "房间不存在" }, { status: 404 });
-  }
-  if (room.status === "finished") {
-    if (room.type === "public") {
+  try {
+    const room = await env.DB.prepare("SELECT * FROM rooms WHERE code = ?")
+      .bind(code)
+      .first<{ code: string; type: string; status: string; max_players: number }>();
+    if (!room) {
       const lobbyId = env.LOBBY_DO.idFromName("global_v2");
       const lobbyStub = env.LOBBY_DO.get(lobbyId) as unknown as DurableObjectStub<LobbyDOv2>;
       await lobbyStub.removeRoom(code);
+      return Response.json({ error: "房间不存在" }, { status: 404 });
     }
-    return Response.json({ error: "游戏已结束" }, { status: 400 });
-  }
-
-  let userId: string | null = null;
-  let username: string;
-
-  if (room.type !== "quick") {
-    const user = await authenticateRequest(request, env);
-    if (!user) {
-      return Response.json({ error: "需要登录" }, { status: 401 });
+    if (room.status === "finished") {
+      if (room.type === "public") {
+        const lobbyId = env.LOBBY_DO.idFromName("global_v2");
+        const lobbyStub = env.LOBBY_DO.get(lobbyId) as unknown as DurableObjectStub<LobbyDOv2>;
+        await lobbyStub.removeRoom(code);
+      }
+      return Response.json({ error: "游戏已结束" }, { status: 400 });
     }
-    userId = user.userId;
-    username = user.username;
-  } else {
-    const user = await authenticateRequest(request, env);
-    if (user) {
+
+    let userId: string | null = null;
+    let username: string;
+
+    if (room.type !== "quick") {
+      const user = await authenticateRequest(request, env);
+      if (!user) {
+        return Response.json({ error: "需要登录" }, { status: 401 });
+      }
       userId = user.userId;
       username = user.username;
     } else {
-      const nick = request.headers.get("X-Uno-Nickname");
-      if (!nick) {
-        return Response.json({ error: "缺少昵称" }, { status: 400 });
+      const user = await authenticateRequest(request, env);
+      if (user) {
+        userId = user.userId;
+        username = user.username;
+      } else {
+        const nick = request.headers.get("X-Uno-Nickname");
+        if (!nick) {
+          return Response.json({ error: "缺少昵称" }, { status: 400 });
+        }
+        username = nick;
       }
-      username = nick;
     }
+
+    const gameRoomId = env.GAME_ROOM_DO.idFromName(code);
+    const gameStub = env.GAME_ROOM_DO.get(gameRoomId) as unknown as DurableObjectStub<GameRoomDOv2>;
+    const joinResult = await gameStub.joinGame(code, username, userId, room.max_players, room.type);
+
+    if (room.type === "public") {
+      const lobbyId = env.LOBBY_DO.idFromName("global_v2");
+      const lobbyStub = env.LOBBY_DO.get(lobbyId) as unknown as DurableObjectStub<LobbyDOv2>;
+      await lobbyStub.updatePlayerCount(code, joinResult.playerCount);
+    }
+
+    return Response.json({ ...joinResult, code });
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : "加入房间失败";
+    console.error("handleJoinRoom error:", e);
+    return Response.json({ error: message }, { status: 400 });
   }
-
-  const gameRoomId = env.GAME_ROOM_DO.idFromName(code);
-  const gameStub = env.GAME_ROOM_DO.get(gameRoomId) as unknown as DurableObjectStub<GameRoomDOv2>;
-  const joinResult = await gameStub.joinGame(code, username, userId, room.max_players, room.type);
-
-  if (room.type === "public") {
-    const lobbyId = env.LOBBY_DO.idFromName("global_v2");
-    const lobbyStub = env.LOBBY_DO.get(lobbyId) as unknown as DurableObjectStub<LobbyDOv2>;
-    await lobbyStub.updatePlayerCount(code, joinResult.playerCount);
-  }
-
-  return Response.json({ ...joinResult, code });
 }
 
 export async function handleLeaveRoom(code: string, request: Request, env: Env): Promise<Response> {
