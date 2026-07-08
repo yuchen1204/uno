@@ -393,8 +393,8 @@ export class GameRoomDOv2 extends DurableObject<Env> {
     this.ctx.storage.sql.exec("UPDATE players SET is_ready = ? WHERE seat_index = ?", newReadyState, seatIndex);
     
     const updatedPlayers = this.getAllPlayers();
-    const connectedPlayers = updatedPlayers.filter(p => p.connected);
-    const allReady = connectedPlayers.every(p => p.isReady);
+    const connectedPlayers = updatedPlayers.filter(p => p.connected || p.isAi);
+    const allReady = connectedPlayers.every(p => p.isReady || p.isAi);
 
     if (allReady && connectedPlayers.length >= 2) {
       this.ctx.storage.sql.exec("UPDATE game_state SET phase = 'countdown', countdown_end = ?", Date.now() + COUNTDOWN_DURATION_MS);
@@ -1052,7 +1052,8 @@ export class GameRoomDOv2 extends DurableObject<Env> {
     }
 
     const players = currentPlayers;
-    const activePlayers = players.filter(p => p.connected);
+    const humanPlayers = players.filter(p => !p.isAi);
+    const activePlayers = humanPlayers.filter(p => p.connected);
     const gsForIdle = this.getGameState();
 
     const configRow = this.ctx.storage.sql.exec<RoomConfigRow>("SELECT code, type, last_activity FROM room_config LIMIT 1").toArray()[0];
