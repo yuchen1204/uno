@@ -785,6 +785,12 @@ export class GameRoomDOv2 extends DurableObject<Env> {
       }
     }
 
+    // If any AI player is in the game, halve the total score
+    const hasAi = players.some(p => p.isAi);
+    if (hasAi) {
+      totalScore = Math.floor(totalScore / 2);
+    }
+
     this.ctx.storage.sql.exec(
       "UPDATE game_state SET phase = 'finished', winner_seat = ? WHERE id = 1",
       winnerSeat,
