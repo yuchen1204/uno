@@ -847,6 +847,29 @@ export class GameRoomDOv2 extends DurableObject<Env> {
       return { success: false, error: "不能回应自己的提议" };
     }
 
+    // Check if the responder is an AI player — auto-decide
+    const responder = this.getAllPlayers().find(p => p.seatIndex === seatIndex);
+    if (responder?.isAi) {
+      const players = this.getAllPlayers();
+      const aiAgreed = aiVoidResponse(
+        responder.hand,
+        (responder.aiDifficulty as AiDifficulty) || "medium",
+        gameState.void_proposal_seat!,
+        seatIndex,
+        players,
+      );
+      if (aiAgreed) {
+        await this.finishVoidGame();
+        return { success: true };
+      } else {
+        this.ctx.storage.sql.exec(
+          "UPDATE game_state SET void_proposal_seat = NULL, void_proposal_timeout = NULL WHERE id = 1"
+        );
+        this.broadcastState();
+        return { success: true };
+      }
+    }
+
     if (agreed) {
       await this.finishVoidGame();
       return { success: true };
