@@ -134,4 +134,18 @@ export const api = {
     const query = limit ? `?limit=${limit}` : "";
     return request(`/leaderboard${query}`);
   },
+
+  addAi(code: string, difficulty: "easy" | "medium" | "hard"): Promise<{ success: boolean; seatIndex?: number; error?: string }> {
+    return request(`/game/${code}/add-ai`, {
+      method: "POST",
+      body: JSON.stringify({ difficulty }),
+    });
+  },
+
+  removeAi(code: string, seatIndex: number): Promise<{ success: boolean; error?: string }> {
+    return request(`/game/${code}/remove-ai`, {
+      method: "POST",
+      body: JSON.stringify({ seatIndex }),
+    });
+  },
 };

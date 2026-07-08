@@ -25,6 +25,7 @@ interface UiState {
   tempNickname: string;
   nicknameJoining: boolean;
   showVoidResponse: boolean;
+  showAiDifficultyPicker: boolean;
 }
 
 type UiAction =
@@ -38,7 +39,8 @@ type UiAction =
   | { type: "SHOW_LEAVE_CONFIRM"; show: boolean }
   | { type: "SHOW_NICKNAME_MODAL"; show: boolean }
   | { type: "SET_TEMP_NICKNAME"; nickname: string }
-  | { type: "SHOW_VOID_RESPONSE"; show: boolean };
+  | { type: "SHOW_VOID_RESPONSE"; show: boolean }
+  | { type: "SHOW_AI_DIFFICULTY_PICKER"; show: boolean };
 
 const initialUi: UiState = {
   pendingCardIndex: -1,
@@ -50,6 +52,7 @@ const initialUi: UiState = {
   tempNickname: "",
   nicknameJoining: false,
   showVoidResponse: false,
+  showAiDifficultyPicker: false,
 };
 
 function uiReducer(state: UiState, action: UiAction): UiState {
@@ -65,6 +68,7 @@ function uiReducer(state: UiState, action: UiAction): UiState {
     case "SHOW_NICKNAME_MODAL": return { ...state, showNicknameModal: action.show };
     case "SET_TEMP_NICKNAME": return { ...state, tempNickname: action.nickname };
     case "SHOW_VOID_RESPONSE": return { ...state, showVoidResponse: action.show };
+    case "SHOW_AI_DIFFICULTY_PICKER": return { ...state, showAiDifficultyPicker: action.show };
   }
 }
 
@@ -376,6 +380,14 @@ export default function GameScreen({ code, onLeave }: Props) {
     if (gameState.phase === "countdown") return "游戏即将开始！";
     if (gameState.phase === "finished") return "游戏结束！";
     if (ui.pendingCardIndex !== -1) return "🌟 请选择一张有色手牌作为连带丢出牌（再次点击已选卡牌取消）";
+
+    if (!isMyTurn && gameState.currentSeat != null) {
+      const currentPlayer = gameState.players.find(p => p.seatIndex === gameState.currentSeat);
+      if (currentPlayer?.isAi) {
+        return `🤖 ${currentPlayer.username} 正在思考...`;
+      }
+    }
+
     if (isMyTurn) {
       if (localSkipCount >= 3) return "⛔ 已跳过3回合，本回合必须出牌或摸牌";
       if (gameState.drawAccumulated > 0) return `💥 惩罚累计中：+${gameState.drawAccumulated}！请出任意+2或+4防守，否则点击牌堆吃惩罚！`;
@@ -417,7 +429,22 @@ export default function GameScreen({ code, onLeave }: Props) {
 
       <div className="game-table">
         <div className="table-top">
-          <PlayerList players={gameState.players} currentSeat={gameState.currentSeat} localSeat={localSeat} />
+          <PlayerList
+            players={gameState.players}
+            currentSeat={gameState.currentSeat}
+            localSeat={localSeat}
+            isHost={localPlayer?.isHost ?? false}
+            onRemoveAi={async (seatIndex) => {
+              try {
+                const result = await api.removeAi(code, seatIndex);
+                if (!result.success) {
+                  setError(result.error || "移除 AI 失败");
+                }
+              } catch (err: any) {
+                setError(err.message || "移除 AI 失败");
+              }
+            }}
+          />
         </div>
 
         <div className="table-center">
@@ -484,6 +511,11 @@ export default function GameScreen({ code, onLeave }: Props) {
               {localPlayer?.isHost && gameState.maxPlayers !== 2 && (
                 <button onClick={handleStartGame}>开始游戏</button>
               )}
+              {localPlayer?.isHost && gameState.players.length < (gameState.maxPlayers ?? 4) && (
+                <div className="ai-controls">
+                  <button onClick={() => dispatch({ type: "SHOW_AI_DIFFICULTY_PICKER", show: true })}>🤖 添加 AI</button>
+                </div>
+              )}
             </div>
           )}
 
@@ -533,6 +565,53 @@ export default function GameScreen({ code, onLeave }: Props) {
             doVoidAction("void_response", false);
           }}
         />
+      )}
+
+      {ui.showAiDifficultyPicker && (
+        <div className="modal-overlay" onClick={() => dispatch({ type: "SHOW_AI_DIFFICULTY_PICKER", show: false })}>
+          <div className="modal ai-difficulty-modal" onClick={e => e.stopPropagation()}>
+            <h3>选择 AI 难度</h3>
+            <div className="ai-difficulty-options">
+              <button className="ai-difficulty-btn easy" onClick={async () => {
+                dispatch({ type: "SHOW_AI_DIFFICULTY_PICKER", show: false });
+                try {
+                  const result = await api.addAi(code, "easy");
+                  if (!result.success) setError(result.error || "添加 AI 失败");
+                } catch (err: any) {
+                  setError(err.message || "添加 AI 失败");
+                }
+              }}>
+                <span className="diff-label">Easy</span>
+                <span className="diff-desc">随机出牌，适合新手</span>
+              </button>
+              <button className="ai-difficulty-btn medium" onClick={async () => {
+                dispatch({ type: "SHOW_AI_DIFFICULTY_PICKER", show: false });
+                try {
+                  const result = await api.addAi(code, "medium");
+                  if (!result.success) setError(result.error || "添加 AI 失败");
+                } catch (err: any) {
+                  setError(err.message || "添加 AI 失败");
+                }
+              }}>
+                <span className="diff-label">Medium</span>
+                <span className="diff-desc">规则驱动，有一定策略</span>
+              </button>
+              <button className="ai-difficulty-btn hard" onClick={async () => {
+                dispatch({ type: "SHOW_AI_DIFFICULTY_PICKER", show: false });
+                try {
+                  const result = await api.addAi(code, "hard");
+                  if (!result.success) setError(result.error || "添加 AI 失败");
+                } catch (err: any) {
+                  setError(err.message || "添加 AI 失败");
+                }
+              }}>
+                <span className="diff-label">Hard</span>
+                <span className="diff-desc">最优策略，极致挑战</span>
+              </button>
+            </div>
+            <button className="secondary" onClick={() => dispatch({ type: "SHOW_AI_DIFFICULTY_PICKER", show: false })}>取消</button>
+          </div>
+        </div>
       )}
     </div>
   );
