@@ -86,4 +86,6 @@ export interface PlayerFull {
   isReady: boolean;
   score: number;
   skipCount: number;
+  isAi: boolean;
+  aiDifficulty?: string;
 }

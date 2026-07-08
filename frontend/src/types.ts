@@ -37,6 +37,8 @@ export interface PlayerInfo {
   isReady: boolean;
   score: number;
   skipCount: number;
+  isAi?: boolean;
+  aiDifficulty?: string;
 }
 
 export interface GameState {

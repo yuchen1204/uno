@@ -73,6 +73,8 @@ export class GameRoomDOv2 extends DurableObject<Env> {
       try { ctx.storage.sql.exec("ALTER TABLE game_state ADD COLUMN void_proposal_seat INTEGER"); } catch (_) {}
       try { ctx.storage.sql.exec("ALTER TABLE game_state ADD COLUMN void_proposal_timeout INTEGER"); } catch (_) {}
       try { ctx.storage.sql.exec("ALTER TABLE game_state ADD COLUMN voided INTEGER DEFAULT 0"); } catch (_) {}
+      try { ctx.storage.sql.exec("ALTER TABLE players ADD COLUMN is_ai INTEGER DEFAULT 0"); } catch (_) {}
+      try { ctx.storage.sql.exec("ALTER TABLE players ADD COLUMN ai_difficulty TEXT DEFAULT NULL"); } catch (_) {}
     });
   }
 
@@ -847,6 +849,8 @@ export class GameRoomDOv2 extends DurableObject<Env> {
       isReady: r.is_ready === 1,
       score: r.score,
       skipCount: r.skip_count ?? 0,
+      isAi: (r.is_ai ?? 0) === 1,
+      aiDifficulty: r.ai_difficulty || undefined,
     }));
   }
 
@@ -1096,6 +1100,8 @@ export class GameRoomDOv2 extends DurableObject<Env> {
         isReady: p.isReady,
         score: p.score,
         skipCount: p.skipCount,
+        isAi: p.isAi,
+        aiDifficulty: p.aiDifficulty,
       })),
       playHistory,
     };

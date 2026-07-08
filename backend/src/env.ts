@@ -17,6 +17,8 @@ export interface PlayerRow extends Record<string, SqlStorageValue> {
   skip_count: number;
   seat_token: string;
   joined_at: string;
+  is_ai: number;
+  ai_difficulty: string | null;
 }
 
 export interface PlayerBasicRow extends Record<string, SqlStorageValue> {
