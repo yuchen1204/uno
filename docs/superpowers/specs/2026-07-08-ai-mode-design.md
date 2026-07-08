@@ -80,7 +80,39 @@ aiDecide(hand, gameState, players, difficulty):
   4. 如果 difficulty 决定不打出牌（Easy 随机概率）→ 摸牌
 ```
 
-### 2.4 防作弊
+### 2.4 Void Game 响应
+
+当 AI 收到 void proposal 时，不再一律拒绝，而是根据手牌好坏决定：
+
+```typescript
+function aiVoidResponse(hand: Card[], difficulty: AiDifficulty, proposerSeat: number, currentSeat: number): boolean {
+  // 返回 true = 同意, false = 拒绝
+  const handScore = evaluateHandQuality(hand);
+  // handScore: 0-1 之间的分数，越高表示手牌越好
+}
+```
+
+**手牌质量评估 (`evaluateHandQuality`)**:
+1. 计算手牌数：牌越少越好
+2. 计算可立即出的牌比例：越高越好
+3. 计算万能牌数量：有万能牌 = 加分
+4. 计算牌面总分（面值之和）：越低越好（说明手牌轻）
+5. 综合评分 = `0-1` 归一化
+
+**三种难度对 void 的响应**:
+
+| 难度 | 同意阈值 | 行为 |
+|------|---------|------|
+| **Easy** | `handScore < 0.3` | 只有手牌很差时才同意（随机 ±0.1 扰动） |
+| **Medium** | `handScore < 0.5` | 手牌一般或差时同意（~10% 随机反转） |
+| **Hard** | `handScore < 0.4` | 根据自己 vs 对手手牌对比决定，自己牌差且对手牌少时不轻易同意 |
+
+**特殊规则**:
+- 如果真人手牌数量 <= 2（快赢了），AI **倾向于同意** void（破坏对手）
+- 如果 AI 手牌数量 <= 2，AI **倾向于拒绝** void（自己快赢了）
+- 如果 AI 手牌 > 5 且对手手牌少，AI **倾向于同意**
+
+### 2.5 防作弊
 
 AI 决策函数只接收**公开的游戏状态**（手牌是自己的，其他玩家只有手牌数量），不读取对手手牌内容。Hard 模式基于游戏状态推断（如对手手牌数量变化、出牌历史等），不基于"窥视"对手手牌。
 
@@ -230,7 +262,7 @@ removeAi(code: string, seatIndex: number): Promise<{ success: boolean }>
 |------|------|
 | 房主在游戏中添加 AI | 不允许，仅在 waiting 阶段可操作 |
 | 游戏进行中，所有真人离开 | AI 自动结束游戏（同现有 leave 逻辑） |
-| AI 的回合触发 void proposal | AI 自动拒绝 void proposal |
+| AI 的回合触发 void proposal | AI 根据手牌质量决定同意/拒绝（见 2.4 节） |
 | 房间只剩 AI 玩家 | AI 之间可以正常对战，真人可旁观 |
 | AI 玩家的准备状态 | AI 自动准备（is_ready = 1） |
 | 快速房间 + AI | 同普通房间，AI 可以添加 |
