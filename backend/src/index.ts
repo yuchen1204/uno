@@ -75,6 +75,18 @@ async function handleGame(request: Request, env: Env, pathname: string): Promise
     return Response.json(result);
   }
 
+  if (action === "add-ai") {
+    const body = await request.json<{ difficulty: string }>();
+    const result = await stub.handleAddAi(body.difficulty);
+    return Response.json(result);
+  }
+
+  if (action === "remove-ai") {
+    const body = await request.json<{ seatIndex: number }>();
+    const result = await stub.handleRemoveAi(body.seatIndex);
+    return Response.json(result);
+  }
+
   if (action === "stream") {
     return stub.fetch(request);
   }

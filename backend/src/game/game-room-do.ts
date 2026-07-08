@@ -4,6 +4,7 @@ import { Card, CardColor, GameState, PlayerFull } from "../types";
 import { createDeck, shuffleDeck, dealCards, cardToScore } from "./deck";
 import { canPlayCard } from "./rules";
 import { calculateHandScore } from "./scoring";
+import { aiDecide, aiVoidResponse, AiDifficulty } from "./ai-player";
 import {
   COUNTDOWN_DURATION_MS, INITIAL_HAND_SIZE, IDLE_TIMEOUT_MS, DISCONNECT_TIMEOUT_MS,
   IDLE_CHECK_INTERVAL_MS, LAST_CARD_WILD_PENALTY, PLAY_HISTORY_LIMIT, MAX_SKIP_COUNT,
@@ -402,6 +403,64 @@ export class GameRoomDOv2 extends DurableObject<Env> {
       await this.ctx.storage.setAlarm(Date.now() + COUNTDOWN_DURATION_MS);
     }
 
+    this.broadcastState();
+    return { success: true };
+  }
+
+  async handleAddAi(difficulty: string): Promise<{ success: boolean; seatIndex?: number; error?: string }> {
+    if (!["easy", "medium", "hard"].includes(difficulty)) {
+      return { success: false, error: "无效的 AI 难度" };
+    }
+
+    const gameState = this.getGameState();
+    if (gameState?.phase !== "waiting") {
+      return { success: false, error: "只能在等待阶段添加 AI" };
+    }
+
+    const existingPlayers = this.ctx.storage.sql.exec<PlayerRow>(
+      "SELECT * FROM players ORDER BY seat_index"
+    ).toArray();
+
+    const config = this.ctx.storage.sql.exec<RoomConfigRow>("SELECT * FROM room_config LIMIT 1").toArray()[0];
+    if (existingPlayers.length >= (config?.max_players ?? 4)) {
+      return { success: false, error: "房间已满" };
+    }
+
+    const usedSeats = new Set(existingPlayers.map(p => p.seat_index));
+    let seatIndex = 0;
+    while (usedSeats.has(seatIndex)) seatIndex++;
+
+    const difficultyLabels: Record<string, string> = { easy: "Easy", medium: "Medium", hard: "Hard" };
+    const username = `AI (${difficultyLabels[difficulty]})`;
+
+    const now = new Date().toISOString();
+    this.ctx.storage.sql.exec(
+      "INSERT INTO players (seat_index, user_id, username, hand, is_host, connected, is_ready, seat_token, joined_at, is_ai, ai_difficulty) VALUES (?, NULL, ?, '[]', 0, 1, 1, '', ?, 1, ?)",
+      seatIndex,
+      username,
+      now,
+      difficulty,
+    );
+
+    this.broadcastState();
+    return { success: true, seatIndex };
+  }
+
+  async handleRemoveAi(seatIndex: number): Promise<{ success: boolean; error?: string }> {
+    const player = this.ctx.storage.sql.exec<{ is_ai: number }>(
+      "SELECT is_ai FROM players WHERE seat_index = ?", seatIndex
+    ).toArray()[0];
+
+    if (!player || player.is_ai !== 1) {
+      return { success: false, error: "该座位不是 AI 玩家" };
+    }
+
+    const gameState = this.getGameState();
+    if (gameState?.phase !== "waiting") {
+      return { success: false, error: "只能在等待阶段移除 AI" };
+    }
+
+    this.ctx.storage.sql.exec("DELETE FROM players WHERE seat_index = ?", seatIndex);
     this.broadcastState();
     return { success: true };
   }
