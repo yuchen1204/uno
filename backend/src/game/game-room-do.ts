@@ -171,6 +171,8 @@ export class GameRoomDOv2 extends DurableObject<Env> {
         isReady: r.is_ready === 1,
         score: r.score,
         skipCount: r.skip_count ?? 0,
+        isAi: (r.is_ai ?? 0) === 1,
+        aiDifficulty: r.ai_difficulty || undefined,
       }));
       nextSeat = this.getNextSeat(me.seat_index, gameState.direction as 1 | -1, fullPlayers);
     }
@@ -200,6 +202,8 @@ export class GameRoomDOv2 extends DurableObject<Env> {
         isReady: r.is_ready === 1,
         score: r.score,
         skipCount: r.skip_count ?? 0,
+        isAi: (r.is_ai ?? 0) === 1,
+        aiDifficulty: r.ai_difficulty || undefined,
       }));
       await this.finishGame(winner.seat_index, allPlayersForScore, 0, 0);
     }
