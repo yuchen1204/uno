@@ -785,10 +785,17 @@ export class GameRoomDOv2 extends DurableObject<Env> {
       }
     }
 
-    // If any AI player is in the game, halve the total score
-    const hasAi = players.some(p => p.isAi);
-    if (hasAi) {
-      totalScore = Math.floor(totalScore / 2);
+    // Scale score based on AI difficulty in the game
+    // Find the highest AI difficulty among all players
+    const aiPlayers = players.filter(p => p.isAi);
+    if (aiPlayers.length > 0) {
+      // Use the highest AI difficulty present to determine the score multiplier
+      const difficulties = aiPlayers.map(p => p.aiDifficulty || "medium");
+      let multiplier = 0.5; // default medium
+      if (difficulties.includes("easy")) multiplier = 0.3;
+      if (difficulties.includes("medium")) multiplier = 0.5;
+      if (difficulties.includes("hard")) multiplier = 0.8;
+      totalScore = Math.floor(totalScore * multiplier);
     }
 
     this.ctx.storage.sql.exec(
