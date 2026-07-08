@@ -1040,9 +1040,20 @@ export class GameRoomDOv2 extends DurableObject<Env> {
       }
     }
 
-    const players = this.getAllPlayers();
-    const activePlayers = players.filter(p => p.connected);
+    // Check if this is an AI turn execution
+    const currentPlayers = this.getAllPlayers();
     const gs = this.getGameState();
+    if (gs?.phase === "playing" && gs.current_seat != null) {
+      const currentPlayer = currentPlayers.find(p => p.seatIndex === gs.current_seat);
+      if (currentPlayer?.isAi) {
+        await this.executeAiDecision(gs.current_seat);
+        return;
+      }
+    }
+
+    const players = currentPlayers;
+    const activePlayers = players.filter(p => p.connected);
+    const gsForIdle = this.getGameState();
 
     const configRow = this.ctx.storage.sql.exec<RoomConfigRow>("SELECT code, type, last_activity FROM room_config LIMIT 1").toArray()[0];
     const lastActivity = configRow?.last_activity ?? 0;
@@ -1214,6 +1225,64 @@ export class GameRoomDOv2 extends DurableObject<Env> {
     }
   }
 
+  private async processAiTurn(): Promise<void> {
+    const gameState = this.getGameState();
+    if (!gameState || gameState.phase !== "playing") return;
+
+    const players = this.getAllPlayers();
+    const currentPlayer = players.find(p => p.seatIndex === gameState.current_seat);
+    if (!currentPlayer || !currentPlayer.isAi) return;
+
+    const delayMap: Record<string, number> = { easy: 800, medium: 1200, hard: 1800 };
+    const delay = delayMap[currentPlayer.aiDifficulty ?? "medium"] || 1200;
+    await this.setAlarmUnlessEarlier(Date.now() + delay);
+  }
+
+  private async executeAiDecision(seatIndex: number): Promise<void> {
+    const gameState = this.getGameState();
+    if (!gameState || gameState.phase !== "playing") return;
+
+    const players = this.getAllPlayers();
+    const player = players.find(p => p.seatIndex === seatIndex);
+    if (!player || !player.isAi) return;
+
+    const topCard = JSON.parse(gameState.top_card || "{}") as Card;
+    const wildColor = gameState.wild_color ? (gameState.wild_color as CardColor) : undefined;
+
+    const decision = aiDecide(
+      player.hand,
+      topCard,
+      wildColor,
+      gameState.draw_accumulated,
+      gameState.min_value,
+      players,
+      player.seatIndex,
+      (player.aiDifficulty as AiDifficulty) || "medium",
+    );
+
+    if (decision.action === "play_card") {
+      const result = this.handlePlayCard(player, players, gameState, {
+        cardIndex: decision.cardIndex,
+        color: decision.color,
+        comboCardIndex: decision.comboCardIndex,
+      });
+      if (result.success) {
+        this.ctx.storage.sql.exec("UPDATE players SET skip_count = 0 WHERE seat_index = ?", player.seatIndex);
+      }
+    } else if (decision.action === "draw_card") {
+      const result = this.handleDrawCard(player, players, gameState);
+      if (result.success) {
+        this.ctx.storage.sql.exec("UPDATE players SET skip_count = 0 WHERE seat_index = ?", player.seatIndex);
+      }
+    } else if (decision.action === "skip_turn") {
+      const result = this.handleSkipTurn(player, players, gameState);
+      if (result.success) {
+        this.ctx.storage.sql.exec("UPDATE players SET skip_count = skip_count + 1 WHERE seat_index = ?", player.seatIndex);
+      }
+    }
+    this.broadcastState();
+  }
+
   async broadcastState(): Promise<void> {
     this.touchActivity();
     await this.ensureIdleAlarm();
@@ -1234,6 +1303,14 @@ export class GameRoomDOv2 extends DurableObject<Env> {
     }
     for (const i of closedIndexes.reverse()) {
       this.pendingStreams.splice(i, 1);
+    }
+
+    // Check if the next player is AI and schedule their turn
+    if (state.phase === "playing" && state.currentSeat != null) {
+      const nextPlayer = this.getAllPlayers().find(p => p.seatIndex === state.currentSeat);
+      if (nextPlayer?.isAi) {
+        await this.processAiTurn();
+      }
     }
   }
 }
